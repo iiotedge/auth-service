@@ -1,0 +1,14 @@
+spring:
+  config:
+    import: "optional:configserver:http://config-server:8888"
+  application:
+    name: login-service
+  profiles:
+    active: dev #${SPRING_PROFILES_ACTIVE:dev}
+server:
+  port: 8082
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka-server:8761/eureka/

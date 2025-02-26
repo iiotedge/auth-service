@@ -1,0 +1,43 @@
+spring:
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://localhost:5432/iotmining
+    username: postgres
+    password: 8506
+    hikari:
+      pool-name: LoginServicePool
+      maximum-pool-size: 10
+      minimum-idle: 5
+      idle-timeout: 30000
+      connection-timeout: 2000
+      max-lifetime: 1800000
+  jpa:
+    hibernate:
+      ddl-auto: update #create-drop
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      server:
+        request:
+          autotime:
+            enabled:false
+      base-path: /actuator
+
+#  flyway:
+#    baseline-on-migrate: true
+#    enabled: true
+#    baseline-description: "init"
+#    baseline-version: 0
+#    user: ${spring.datasource.username}
+#    password: ${spring.datasource.password}
+##server:
+##  port: 8090
+#
+#application:
+#  config:
+#    login-url: http://localhost:8082/api/v1/auth/login
