@@ -4,7 +4,7 @@ spring:
   application:
     name: login-service
   profiles:
-    active: prod #${SPRING_PROFILES_ACTIVE:dev}
+    active: dev #${SPRING_PROFILES_ACTIVE:dev}
 server:
   port: 8082
 
