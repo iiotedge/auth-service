@@ -1,0 +1,16 @@
+package com.iotmining.services.auth.configuration;
+
+import org.springframework.context.annotation.Configuration;
+
+//import com.codenaive.iot.dashboard.auth.context.DataSourceContextHolder;
+
+import jakarta.annotation.PostConstruct;
+
+@Configuration
+public class AppConfig {
+
+    @PostConstruct
+    public void initialize() {
+        System.out.println("Beans Constructed...");
+    }
+}

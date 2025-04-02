@@ -1,54 +1,247 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Configuration status="WARN">
-    <Appenders>
-        <RollingFile name="FileAppender" fileName="/var/log/microservice/authentication.log"
-                     filePattern="/var/log/microservice/authentication-%d{yyyy-MM-dd}.log.gz">
-            <PatternLayout>
-                <Pattern>%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %msg%n</Pattern>
-            </PatternLayout>
-            <Policies>
-                <SizeBasedTriggeringPolicy size="10MB"/>
-            </Policies>
-        </RollingFile>
-        <Console name="Console" target="SYSTEM_OUT">
-            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %msg%n"/>
-        </Console>
-    </Appenders>
-    <Loggers>
-        <Root level="info">
-            <AppenderRef ref="FileAppender"/>
-            <AppenderRef ref="Console"/>
-        </Root>
-    </Loggers>
-</Configuration>
+<!--<Configuration status="WARN" monitorInterval="30">-->
 
-        <!--<Configuration status="WARN">-->
+<!--    &lt;!&ndash; Define Static Properties &ndash;&gt;-->
+<!--    <Properties>-->
+<!--        <Property name="SERVICE_NAME">Login-service</Property>-->
+<!--        <Property name="LOG_DIR">logs</Property>-->
+<!--        <Property name="MAX_FILE_SIZE">10MB</Property>-->
+<!--        <Property name="MAX_BACKUP_FILES">10</Property>-->
+<!--        <Property name="PATTERN">%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level [%X{SERVICE_NAME}] %c{1} - %msg%n</Property>-->
+<!--        <Property name="JSON_PATTERN">-->
+<!--            { "timestamp": "%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ}",-->
+<!--            "level": "%level",-->
+<!--            "service": "${SERVICE_NAME}",-->
+<!--            "logger": "%c",-->
+<!--            "message": "%msg",-->
+<!--            "thread": "%t" }%n-->
+<!--        </Property>-->
+<!--        <Property name="LOG_FILE">${LOG_DIR}/Login-service.log</Property>-->
+<!--        <Property name="LOG_JSON_FILE">${LOG_DIR}/Login-service.json</Property>-->
+<!--        <Property name="KAFKA_BROKER">kafka:9092</Property>-->
+<!--        <Property name="KAFKA_TOPIC">log_topic</Property>-->
+<!--    </Properties>-->
+
 <!--    <Appenders>-->
-<!--        &lt;!&ndash; Console Appender &ndash;&gt;-->
+<!--        &lt;!&ndash; Console Appender (for debugging and local logs) &ndash;&gt;-->
 <!--        <Console name="Console" target="SYSTEM_OUT">-->
-<!--            <PatternLayout>-->
-<!--                <Pattern>{"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSS}","level":"%p","logger":"%c","message":"%m","thread":"%t"}%n</Pattern>-->
-<!--            </PatternLayout>-->
+<!--            <PatternLayout pattern="${PATTERN}"/>-->
 <!--        </Console>-->
 
-<!--        &lt;!&ndash; Rolling File Appender &ndash;&gt;-->
-<!--        <RollingFile name="File" fileName="/tmp/log/microservice/authentication.log"-->
-<!--                     filePattern="/tmp/log/microservice/authentication-%d{yyyy-MM-dd}.log.gz">-->
-<!--            <JsonLayout compact="true" eventEol="true"/>-->
+<!--        &lt;!&ndash; Rolling File Appender (for local logs with rotation) &ndash;&gt;-->
+<!--        <RollingFile name="RollingFile"-->
+<!--                     fileName="${LOG_FILE}"-->
+<!--                     filePattern="${LOG_FILE}.%d{yyyy-MM-dd}.gz">-->
+<!--            <PatternLayout pattern="${PATTERN}"/>-->
 <!--            <Policies>-->
-<!--                <SizeBasedTriggeringPolicy size="10MB"/>-->
+<!--                <SizeBasedTriggeringPolicy size="${MAX_FILE_SIZE}"/>-->
+<!--                <TimeBasedTriggeringPolicy/>-->
 <!--            </Policies>-->
+<!--            <DefaultRolloverStrategy max="10"/>-->
 <!--        </RollingFile>-->
+
+<!--        &lt;!&ndash; JSON File Appender &ndash;&gt;-->
+<!--        <RollingFile name="JsonFile"-->
+<!--                     fileName="${LOG_JSON_FILE}"-->
+<!--                     filePattern="${LOG_JSON_FILE}.%d{yyyy-MM-dd}.gz">-->
+<!--            <PatternLayout pattern="${JSON_PATTERN}"/>-->
+<!--            <Policies>-->
+<!--                <SizeBasedTriggeringPolicy size="${MAX_FILE_SIZE}"/>-->
+<!--                <TimeBasedTriggeringPolicy/>-->
+<!--            </Policies>-->
+<!--            <DefaultRolloverStrategy max="10"/>-->
+<!--        </RollingFile>-->
+
+<!--        &lt;!&ndash; Kafka Appender to send logs to Kafka &ndash;&gt;-->
+<!--&lt;!&ndash;        <Kafka name="KafkaAppender">&ndash;&gt;-->
+<!--&lt;!&ndash;            <Property name="bootstrap.servers">${KAFKA_BROKER}</Property>&ndash;&gt;-->
+<!--&lt;!&ndash;            <Property name="topic">${KAFKA_TOPIC}</Property>&ndash;&gt;-->
+<!--&lt;!&ndash;            <JsonLayout compact="true" eventEol="true"/>&ndash;&gt;-->
+<!--&lt;!&ndash;        </Kafka>&ndash;&gt;-->
+
+<!--        &lt;!&ndash; Async Logger for better performance &ndash;&gt;-->
+<!--        <Async name="AsyncFile">-->
+<!--            <AppenderRef ref="RollingFile"/>-->
+<!--            <AppenderRef ref="JsonFile"/>-->
+<!--&lt;!&ndash;            <AppenderRef ref="KafkaAppender"/>&ndash;&gt;-->
+<!--        </Async>-->
 <!--    </Appenders>-->
 
 <!--    <Loggers>-->
-<!--        <Logger name="com.iotmining.services.login_service.controller" level="info" additivity="false">-->
-<!--            <AppenderRef ref="Console"/>-->
-<!--            <AppenderRef ref="File"/>-->
+<!--        <Logger name="com.iotmining" level="info" additivity="false">-->
+<!--            <AppenderRef ref="AsyncFile"/>-->
 <!--        </Logger>-->
-<!--        <Root level="warn">-->
+
+<!--        <Logger name="org.springframework" level="warn"/>-->
+<!--        <Logger name="org.hibernate" level="warn"/>-->
+<!--        <Logger name="org.apache.kafka" level="warn"/>-->
+
+<!--        <Root level="info">-->
 <!--            <AppenderRef ref="Console"/>-->
-<!--            <AppenderRef ref="File"/>-->
+<!--            <AppenderRef ref="AsyncFile"/>-->
 <!--        </Root>-->
 <!--    </Loggers>-->
+
 <!--</Configuration>-->
+
+<Configuration status="WARN" monitorInterval="30">
+
+    <!-- Define Static Properties -->
+    <Properties>
+        <Property name="SERVICE_NAME">Login-service</Property>
+        <Property name="LOG_DIR">logs</Property>
+        <Property name="MAX_FILE_SIZE">10MB</Property>
+        <Property name="MAX_BACKUP_FILES">10</Property>
+        <Property name="PATTERN">%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level [%X{SERVICE_NAME}] %c{1} - %msg%n</Property>
+        <Property name="JSON_PATTERN">
+            { "timestamp": "%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ}",
+            "level": "%level",
+            "service": "${SERVICE_NAME}",
+            "logger": "%c",
+            "message": "%msg",
+            "thread": "%t" }%n
+        </Property>
+        <Property name="LOG_FILE">${LOG_DIR}/Login-service.log</Property>
+        <Property name="LOG_JSON_FILE">${LOG_DIR}/Login-service.json</Property>
+        <Property name="KAFKA_BROKER">kafka:9092</Property>
+        <Property name="KAFKA_TOPIC">log_topic</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- Console Appender (for debugging and local logs) -->
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="${PATTERN}"/>
+        </Console>
+
+        <!-- Rolling File Appender (for local logs with rotation) -->
+        <RollingFile name="RollingFile"
+                     fileName="${LOG_FILE}"
+                     filePattern="${LOG_FILE}.%d{yyyy-MM-dd}.gz">
+            <PatternLayout pattern="${PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="${MAX_FILE_SIZE}"/>
+                <TimeBasedTriggeringPolicy/>
+            </Policies>
+            <DefaultRolloverStrategy max="10"/>
+        </RollingFile>
+
+        <!-- JSON File Appender -->
+        <RollingFile name="JsonFile"
+                     fileName="${LOG_JSON_FILE}"
+                     filePattern="${LOG_JSON_FILE}.%d{yyyy-MM-dd}.gz">
+            <PatternLayout pattern="${JSON_PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="${MAX_FILE_SIZE}"/>
+                <TimeBasedTriggeringPolicy/>
+            </Policies>
+            <DefaultRolloverStrategy max="10"/>
+        </RollingFile>
+
+        <!-- Kafka Appender to send logs to Kafka -->
+        <Kafka name="KafkaAppender">
+            <Property name="bootstrap.servers">${KAFKA_BROKER}</Property>
+            <Property name="topic">${KAFKA_TOPIC}</Property>
+            <JsonLayout compact="true" eventEol="true"/>
+        </Kafka>
+
+        <!-- Async Logger for better performance -->
+        <Async name="AsyncFile">
+            <AppenderRef ref="RollingFile"/>
+            <AppenderRef ref="JsonFile"/>
+            <AppenderRef ref="KafkaAppender"/>
+        </Async>
+    </Appenders>
+
+    <Loggers>
+        <Logger name="com.iotmining" level="info" additivity="false">
+            <AppenderRef ref="AsyncFile"/>
+        </Logger>
+
+        <Logger name="org.springframework" level="warn"/>
+        <Logger name="org.hibernate" level="warn"/>
+        <Logger name="org.apache.kafka" level="warn"/>
+
+        <Root level="info">
+            <AppenderRef ref="Console"/>
+            <AppenderRef ref="AsyncFile"/>
+        </Root>
+    </Loggers>
+
+</Configuration>
+
+
+
+<!--<Configuration status="WARN" monitorInterval="30">-->
+
+<!--    &lt;!&ndash; Define Properties for Paths &ndash;&gt;-->
+<!--    <Properties>-->
+<!--        <Property name="LOG_DIR">logs</Property>-->
+<!--        <Property name="SERVICE_NAME">Login-service</Property>-->
+<!--        <Property name="LOG_FILE">${LOG_DIR}/%{SERVICE_NAME}.log</Property>-->
+<!--        <Property name="LOG_JSON_FILE">${LOG_DIR}/%{SERVICE_NAME}.json</Property>-->
+<!--        <Property name="MAX_FILE_SIZE">10MB</Property>-->
+<!--        <Property name="MAX_BACKUP_FILES">10</Property>-->
+<!--        <Property name="PATTERN">%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level [%X{SERVICE_NAME}] %c{1} - %msg%n</Property>-->
+<!--        <Property name="JSON_PATTERN">-->
+<!--            { "timestamp": "%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ}",-->
+<!--            "level": "%level",-->
+<!--            "service": "%X{SERVICE_NAME}",-->
+<!--            "logger": "%c",-->
+<!--            "message": "%msg",-->
+<!--            "thread": "%t" }%n-->
+<!--        </Property>-->
+<!--    </Properties>-->
+
+<!--    <Appenders>-->
+<!--        &lt;!&ndash; Console Appender (for debugging and local logs) &ndash;&gt;-->
+<!--        <Console name="Console" target="SYSTEM_OUT">-->
+<!--            <PatternLayout pattern="${PATTERN}"/>-->
+<!--        </Console>-->
+
+<!--        &lt;!&ndash; Rolling File Appender (for local logs with rotation) &ndash;&gt;-->
+<!--        <RollingFile name="RollingFile" fileName="${LOG_FILE}" filePattern="${LOG_FILE}.%d{yyyy-MM-dd}.gz">-->
+<!--            <PatternLayout pattern="${PATTERN}"/>-->
+<!--            <Policies>-->
+<!--                <SizeBasedTriggeringPolicy size="${MAX_FILE_SIZE}"/>-->
+<!--                <TimeBasedTriggeringPolicy/>-->
+<!--            </Policies>-->
+<!--            <DefaultRolloverStrategy max="10"/>-->
+<!--        </RollingFile>-->
+
+<!--        &lt;!&ndash; JSON File Appender (for structured logging, used by ELK) &ndash;&gt;-->
+<!--        <RollingFile name="JsonFile" fileName="${LOG_JSON_FILE}" filePattern="${LOG_JSON_FILE}.%d{yyyy-MM-dd}.gz">-->
+<!--            <PatternLayout pattern="${JSON_PATTERN}"/>-->
+<!--            <Policies>-->
+<!--                <SizeBasedTriggeringPolicy size="${MAX_FILE_SIZE}"/>-->
+<!--                <TimeBasedTriggeringPolicy/>-->
+<!--            </Policies>-->
+<!--            <DefaultRolloverStrategy max="10"/>-->
+<!--        </RollingFile>-->
+
+<!--        &lt;!&ndash; Async Logger for better performance &ndash;&gt;-->
+<!--        <Async name="AsyncFile">-->
+<!--            <AppenderRef ref="RollingFile"/>-->
+<!--            <AppenderRef ref="JsonFile"/>-->
+<!--        </Async>-->
+<!--    </Appenders>-->
+
+<!--    <Loggers>-->
+<!--        &lt;!&ndash; Application Logs &ndash;&gt;-->
+<!--        <Logger name="com.iotmining" level="info" additivity="false">-->
+<!--            <AppenderRef ref="AsyncFile"/>-->
+<!--        </Logger>-->
+
+<!--        &lt;!&ndash; External Library Logs (Reduce Noise) &ndash;&gt;-->
+<!--        <Logger name="org.springframework" level="warn"/>-->
+<!--        <Logger name="org.hibernate" level="warn"/>-->
+<!--        <Logger name="org.apache.kafka" level="warn"/>-->
+
+<!--        &lt;!&ndash; Root Logger &ndash;&gt;-->
+<!--        <Root level="info">-->
+<!--            <AppenderRef ref="Console"/>-->
+<!--            <AppenderRef ref="AsyncFile"/>-->
+<!--        </Root>-->
+<!--    </Loggers>-->
+
+<!--</Configuration>-->
+

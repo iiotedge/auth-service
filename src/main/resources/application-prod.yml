@@ -5,7 +5,7 @@ spring:
     username: ${DB1_USERNAME}
     password: ${DB1_PASSWORD}
     hikari:
-      pool-name: LoginServicePool
+      pool-name: LoginProdServicePool
       maximum-pool-size: 10
       minimum-idle: 5
       idle-timeout: 30000
@@ -21,17 +21,6 @@ spring:
   redis:
     host: redis-service
     port: 6379
-
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,metrics,prometheus
-      server:
-        request:
-          autotime:
-            enabled:false
-      base-path: /actuator
 
 #  flyway:
 #    baseline-on-migrate: true

@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: auth-service
+  cloud:
+    config:
+      uri: ${CONFIG_SERVER_URL:http://localhost:8888}  # Dynamic config loading
+      fail-fast: true
