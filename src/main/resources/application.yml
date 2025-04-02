@@ -2,7 +2,7 @@ spring:
   config:
     import: "optional:configserver:${CONFIG_SERVER_URL:http://localhost:8888}"
   application:
-    name: auth-service
+    name: IoTMining - Auth Service
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:dev}
 server:
