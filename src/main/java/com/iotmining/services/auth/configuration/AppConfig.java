@@ -1,16 +1,16 @@
 package com.iotmining.services.auth.configuration;
 
+import lombok.extern.log4j.Log4j2;
 import org.springframework.context.annotation.Configuration;
-
-//import com.codenaive.iot.dashboard.auth.context.DataSourceContextHolder;
 
 import jakarta.annotation.PostConstruct;
 
 @Configuration
+@Log4j2
 public class AppConfig {
 
     @PostConstruct
     public void initialize() {
-        System.out.println("Beans Constructed...");
+        log.info("Beans Constructed...");
     }
 }

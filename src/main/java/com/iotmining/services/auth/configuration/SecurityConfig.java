@@ -50,7 +50,6 @@ public class SecurityConfig extends WsConfigurerAdapter {
 
         http.cors(cors -> cors.configurationSource(corsConfigurationSource)) // Enable CORS
                 .csrf(AbstractHttpConfigurer::disable)
-//                .csrf(csrf -> csrf.disable())
                 .authorizeHttpRequests((authorize) -> {
                     authorize
                             .requestMatchers("/api/v1/auth/login", "/api/v1/auth/register",
