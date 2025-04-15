@@ -19,8 +19,24 @@ spring:
   kafka:
     bootstrap-servers: kafka-service:9092
   redis:
-    host: redis-service
-    port: 6379
+    host: ${REDIS_HOST:redis}           # From Kubernetes ConfigMap or default to 'redis'
+    port: ${REDIS_PORT:6379}            # Default Redis port
+    password: ${REDIS_PASSWORD:8506}    # Use K8s Secret in production
+    timeout: ${REDIS_TIMEOUT:2000}      # Connection timeout (ms)
+
+    redis:
+      pool:
+        max-active: ${REDIS_POOL_MAX_ACTIVE:10}
+        max-idle: ${REDIS_POOL_MAX_IDLE:5}
+        min-idle: ${REDIS_POOL_MIN_IDLE:1}
+        max-wait: ${REDIS_POOL_MAX_WAIT:2000} # in ms
+
+rate:
+  limit:
+    max-requests: ${RATE_LIMIT_MAX_REQUESTS:10}            # Default: 10 requests
+    time-window-seconds: ${RATE_LIMIT_TIME_WINDOW:60}      # 60s = 1 minute
+    error-message: ${RATE_LIMIT_ERROR_MESSAGE:Too many requests. Please try again in a few seconds.}
+
 
 #  flyway:
 #    baseline-on-migrate: true

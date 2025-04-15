@@ -1,5 +1,6 @@
 package com.iotmining.services.auth.controller;
 
+import com.iotmining.services.auth.annotation.RateLimited;
 import com.iotmining.services.auth.util.JwtTokenProvider;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -48,6 +49,7 @@ public class AuthenticationController {
             @ApiResponse(responseCode = "401", description = "Invalid credentials", content = @Content(mediaType = "application/json")),
             @ApiResponse(responseCode = "500", description = "Internal Server Error", content = @Content(mediaType = "application/json"))
     })
+    @RateLimited
     public ResponseEntity<Map<String, Object>> login(@RequestBody @Valid UserCredentialDTO loginRequest) {
 
         log.info("Login attempt for user: {}", loginRequest.getUsername());

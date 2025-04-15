@@ -12,12 +12,20 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
+        include: "*" # health,info,metrics,prometheus
       server:
         request:
           autotime:
             enabled:false
       base-path: /actuator
+    prometheus:
+      enabled: true  # Make sure this is enabled
+  metrics:
+    export:
+      prometheus:
+        enabled: true  # Enable Prometheus export
+    enable:
+      jvm: true  # Ensure JVM metrics are enabled
 
 eureka:
   client:

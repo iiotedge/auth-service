@@ -137,18 +137,25 @@
             <DefaultRolloverStrategy max="10"/>
         </RollingFile>
 
+<!--         Kafka Appender to send logs to Kafka -->
+<!--        <Kafka name="KafkaAppender">-->
+<!--            <Property name="bootstrap.servers">${KAFKA_BROKER}</Property>-->
+<!--            <Property name="topic">${KAFKA_TOPIC}</Property>-->
+<!--            <JsonLayout compact="true" eventEol="true"/>-->
+<!--        </Kafka>-->
+
         <!-- Kafka Appender to send logs to Kafka -->
-        <Kafka name="KafkaAppender">
-            <Property name="bootstrap.servers">${KAFKA_BROKER}</Property>
-            <Property name="topic">${KAFKA_TOPIC}</Property>
-            <JsonLayout compact="true" eventEol="true"/>
-        </Kafka>
+<!--        <Kafka name="KafkaAppender" topic="${KAFKA_TOPIC}">-->
+<!--        <Kafka name="KafkaAppender" topic="${KAFKA_TOPIC}">-->
+<!--            <Property name="bootstrap.servers">${KAFKA_BROKER}</Property>-->
+<!--            <JsonLayout compact="true" eventEol="true"/>-->
+<!--        </Kafka>-->
 
         <!-- Async Logger for better performance -->
         <Async name="AsyncFile">
             <AppenderRef ref="RollingFile"/>
-            <AppenderRef ref="JsonFile"/>
-            <AppenderRef ref="KafkaAppender"/>
+<!--            <AppenderRef ref="JsonFile"/>-->
+<!--            <AppenderRef ref="KafkaAppender"/>-->
         </Async>
     </Appenders>
 
@@ -159,7 +166,7 @@
 
         <Logger name="org.springframework" level="warn"/>
         <Logger name="org.hibernate" level="warn"/>
-        <Logger name="org.apache.kafka" level="warn"/>
+<!--        <Logger name="org.apache.kafka" level="warn"/>-->
 
         <Root level="info">
             <AppenderRef ref="Console"/>

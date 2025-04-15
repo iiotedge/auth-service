@@ -16,6 +16,23 @@ spring:
       ddl-auto: create-drop
     database: postgresql
     database-platform: org.hibernate.dialect.PostgreSQLDialect
+  redis:
+    host: localhost  # The Redis service name in Docker Compose (could be 'localhost' in dev environments)
+    port: 6379   # Default Redis port
+    password: 8506  # Password for Redis if authentication is enabled
+    redis:
+      pool:
+        max-active: 10  # Maximum number of connections in the Redis connection pool
+        max-idle: 5     # Maximum number of idle connections
+        min-idle: 1     # Minimum number of idle connections
+        max-wait: 2000  # Maximum wait time (in ms) to get a connection from the pool
+    timeout: 2000  # Connection timeout for Redis (in ms)
+
+rate:
+  limit:
+    max-requests: 10  # Max 10 requests per minute
+    time-window: 1     # 1 minute time window
+    error-message: "Too many requests. Please try again in a few seconds."
 
 springdoc:
   api-docs:

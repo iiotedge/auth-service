@@ -7,6 +7,7 @@
         <groupId>com.iotmining</groupId>
         <artifactId>microservices</artifactId>
         <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath> <!-- This is the path to the parent -->
     </parent>
 
     <artifactId>auth-service</artifactId>
@@ -31,17 +32,17 @@
 
     <dependencies>
         <!-- https://mvnrepository.com/artifact/org.apache.kafka/kafka-log4j-appender -->
-        <dependency>
-            <groupId>org.apache.kafka</groupId>
-            <artifactId>kafka-log4j-appender</artifactId>
-            <version>3.9.0</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-reload4j</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
+<!--        <dependency>-->
+<!--            <groupId>org.apache.kafka</groupId>-->
+<!--            <artifactId>kafka-log4j-appender</artifactId>-->
+<!--            <version>3.9.0</version>-->
+<!--            <exclusions>-->
+<!--                <exclusion>-->
+<!--                    <groupId>org.slf4j</groupId>-->
+<!--                    <artifactId>slf4j-reload4j</artifactId>-->
+<!--                </exclusion>-->
+<!--            </exclusions>-->
+<!--        </dependency>-->
 
         <!-- https://mvnrepository.com/artifact/org.apache.kafka/kafka-clients -->
         <dependency>
