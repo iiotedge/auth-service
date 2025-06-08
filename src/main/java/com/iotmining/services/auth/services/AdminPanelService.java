@@ -2,6 +2,7 @@ package com.iotmining.services.auth.services;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 import com.iotmining.services.auth.entity.UserLoginData;
 import com.iotmining.services.auth.repository.UserLoginDataRepository;
@@ -27,7 +28,7 @@ public class AdminPanelService {
     @Autowired
     private UserRepository adminPanelRepository;
 
-    public Map<String, Object> revokeUserAccess(Long userId, Boolean status) {
+    public Map<String, Object> revokeUserAccess(UUID userId, Boolean status) {
         UserLoginData user = userLoginDataRepository.findById(userId)
                 .orElseThrow(() -> new EntityNotFoundException("User not found"));
 

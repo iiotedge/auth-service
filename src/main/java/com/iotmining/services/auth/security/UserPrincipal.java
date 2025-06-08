@@ -5,6 +5,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import lombok.Getter;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -12,6 +13,7 @@ import org.springframework.security.core.userdetails.UserDetails;
 import com.iotmining.services.auth.entity.Role;
 import com.iotmining.services.auth.entity.User;
 
+@Getter
 public class UserPrincipal implements UserDetails {
 
     private User user;
@@ -58,7 +60,4 @@ public class UserPrincipal implements UserDetails {
         return user.getIsAccountActive();
     }
 
-    public User getUser() {
-        return user;
-    }
 }

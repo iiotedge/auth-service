@@ -3,53 +3,96 @@ package com.iotmining.services.auth.util;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.util.Base64;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.function.Function;
 
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 
+import com.iotmining.common.data.tenant.TenantAccessLevel;
+import com.iotmining.common.data.tenant.TenantType;
 import com.iotmining.services.auth.dto.UserLoginDataDTO;
-import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.stereotype.Component;
-
 import com.iotmining.services.auth.security.UserPrincipal;
-
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.stereotype.Component;
 
 @Component
 public class JwtTokenProvider {
 
     private final static long JWT_EXPIRATION_MIN = 30;
     private static final long EXPIRATION_TIME_MS = 300000; // 5 min
-    private static String SECRET_KEY;
+//    private static String SECRET_KEY;
 
-    public JwtTokenProvider() {
-        try {
-            KeyGenerator keyGenerator = KeyGenerator.getInstance("HmacSHA256");
-            SecretKey secretKey = keyGenerator.generateKey();
-            SECRET_KEY = Base64.getEncoder().encodeToString(secretKey.getEncoded());
+//    @Value("${jwt.secret}")
+//    private static String secretKeyBase64="Vlo2vcFdiXGgWqZLEpLw6kk99sH8/4odgC2XgZV0IbA=";
 
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException(e);
+    @Value("${jwt.secret}")
+    private String secretKeyBase64;
+
+    private static SecretKey secretKey;
+
+//    public JwtTokenProvider() {
+//        try {
+//            KeyGenerator keyGenerator = KeyGenerator.getInstance("HmacSHA256");
+//            SecretKey secretKey = keyGenerator.generateKey();
+//            this.secretKey = Base64.getEncoder().encodeToString(secretKey.getEncoded());
+//        } catch (NoSuchAlgorithmException e) {
+//            throw new RuntimeException(e);
+//        }
+//    }
+
+
+    @PostConstruct
+    public void init() {
+        secretKey = Keys.hmacShaKeyFor(Decoders.BASE64.decode(secretKeyBase64));
+    }
+
+    //    private static SecretKey getKey() {
+//        return Keys.hmacShaKeyFor(Decoders.BASE64.decode(secretKey));
+//    }
+    private static SecretKey getKey() {
+        return secretKey;
+    }
+
+    private static TenantType determineTenantType(List<String> roles) {
+        if (roles.contains("ROLE_SUPER_ADMIN")) {
+            return TenantType.ORGANIZATION;
+        } else if (roles.contains("ROLE_ADMIN")) {
+            return TenantType.COMPANY;
+        } else {
+            return TenantType.USER;
         }
     }
 
-    private static SecretKey getKey() {
-        return Keys.hmacShaKeyFor(Decoders.BASE64.decode(SECRET_KEY));
+    private static TenantAccessLevel determineAccessLevel(TenantType tenantType) {
+        return switch (tenantType) {
+            case ORGANIZATION -> TenantAccessLevel.SUPER;
+            case COMPANY -> TenantAccessLevel.ADMIN;
+            case USER -> TenantAccessLevel.READ_ONLY;
+        };
     }
 
+    /**
+     * Generate JWT Token containing user role, tenantId and access level
+     */
     public static UserLoginDataDTO generateToken(UserPrincipal userDetails, List<String> roles) {
 
         Map<String, Object> claims = new HashMap<>();
+        claims.put("userId", userDetails.getUser().getUserId());
         claims.put("role", roles);
+
+        // 👇 Add TenantType and AccessLevel
+        TenantType tenantType = determineTenantType(roles);
+        claims.put("tenantType", tenantType.name());
+
+        TenantAccessLevel accessLevel = determineAccessLevel(tenantType);
+        claims.put("accessLevel", accessLevel.name());
 
         UserLoginDataDTO userLoginDataDTO;
 
@@ -57,22 +100,20 @@ public class JwtTokenProvider {
         Date currentDate = Date.from(currentLocalDateTime.atZone(ZoneId.systemDefault()).toInstant());
 
         Date expireDate;
-        // For super admin
         LocalDateTime expireLocalDateForSuperAdmin = LocalDateTime.now().plusMinutes(JWT_EXPIRATION_MIN);
-        // For normal user
         LocalDateTime expireLocalDateForOtherUser = LocalDateTime.now().plusSeconds(EXPIRATION_TIME_MS / 1000);
 
         String token;
         if (roles.contains("ROLE_SUPER_ADMIN")) {
             claims.put("superAdmin", true);
             claims.put("accessLevel", "full");
-            expireDate = Date
-                    .from(expireLocalDateForSuperAdmin.atZone(ZoneId.systemDefault()).toInstant());
+            expireDate = Date.from(expireLocalDateForSuperAdmin.atZone(ZoneId.systemDefault()).toInstant());
         } else {
             claims.put("superAdmin", false);
             claims.put("accessLevel", "low");
             expireDate = Date.from(expireLocalDateForOtherUser.atZone(ZoneId.systemDefault()).toInstant());
         }
+
         token = Jwts.builder()
                 .subject(userDetails.getUsername())
                 .claims(claims)
@@ -80,8 +121,21 @@ public class JwtTokenProvider {
                 .expiration(expireDate)
                 .signWith(getKey())
                 .compact();
-        userLoginDataDTO = new UserLoginDataDTO(userDetails.getUser().getUserId(), null, null, token,
-                currentLocalDateTime, expireLocalDateForSuperAdmin, null, null, null, true, userDetails.getUser());
+
+        userLoginDataDTO = new UserLoginDataDTO(
+                userDetails.getUser().getUserId(),
+                null,
+                null,
+                token,
+                currentLocalDateTime,
+                expireLocalDateForSuperAdmin,
+                null,
+                null,
+                null,
+                true,
+                userDetails.getUser()
+        );
+
         return userLoginDataDTO;
     }
 
@@ -90,11 +144,11 @@ public class JwtTokenProvider {
     }
 
     private static <T> T extractClaim(String token, Function<Claims, T> claimResolver) {
-        final Claims claims = extractAlClaims(token);
+        final Claims claims = extractAllClaims(token);
         return claimResolver.apply(claims);
     }
 
-    private static Claims extractAlClaims(String token) {
+    public static Claims extractAllClaims(String token) {
         return Jwts.parser()
                 .verifyWith(getKey())
                 .build()
@@ -112,14 +166,12 @@ public class JwtTokenProvider {
 
     public static Boolean verifyToken(String token, UserDetails userDetails) {
         final String userName = extractUserName(token);
-
         return (userName.equals(userDetails.getUsername()) && !isTokenExpired(token));
     }
 
     public static Boolean validateToken(String token) {
         try {
             final String userName = extractUserName(token);
-//            System.out.println("Here");
             return (userName != null && !isTokenExpired(token));
         } catch (Exception e) {
             return false;

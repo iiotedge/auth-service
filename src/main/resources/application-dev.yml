@@ -14,8 +14,9 @@ spring:
   jpa:
     hibernate:
       ddl-auto: create-drop
+#      ddl-auto: update
     database: postgresql
-    database-platform: org.hibernate.dialect.PostgreSQLDialect
+#    database-platform: org.hibernate.dialect.PostgreSQLDialect
   redis:
     host: localhost  # The Redis service name in Docker Compose (could be 'localhost' in dev environments)
     port: 6379   # Default Redis port
@@ -48,8 +49,17 @@ service:
   name: Login-service
 
 server:
-  port: 8081
+  port: 8096
 
+jwt:
+  secret: "Vlo2vcFdiXGgWqZLEpLw6kk99sH8/4odgC2XgZV0IbA="
+
+cors:
+  allowed-origins: ${ALLOWED_CORS_ORIGINS:http://localhost:3000}
+
+tenant:
+  service:
+    url: ${TMS_SERVICE_URL:http://localhost:8083/api/v1/tenants}
 #  flyway:
 #    baseline-on-migrate: true
 #    enabled: true

@@ -2,6 +2,7 @@ package com.iotmining.services.auth.dto;
 
 import java.time.LocalDateTime;
 import java.util.Date;
+import java.util.UUID;
 
 import com.iotmining.services.auth.entity.User;
 
@@ -14,7 +15,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class UserLoginDataDTO {
 
-    private Long UserId;
+    private UUID id;
     private String passwordSalt;
     private Integer hashAlgorithmId;
     private String confirmationToken;

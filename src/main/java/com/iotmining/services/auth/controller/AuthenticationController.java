@@ -10,6 +10,7 @@ import lombok.extern.log4j.Log4j2;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.BindingResult;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -128,7 +129,11 @@ public class AuthenticationController {
             @ApiResponse(responseCode = "409", description = "Username already exists"),
             @ApiResponse(responseCode = "400", description = "Invalid request data")
     })
-    public ResponseEntity<Map<String, Object>> register(@RequestBody @Valid RegisterDTO register) {
+    public ResponseEntity<Map<String, Object>> register(@RequestBody @Valid RegisterDTO register, BindingResult result) {
+        if (result.hasErrors()) {
+            response.put("Error", result.getAllErrors().toString());
+            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+        }
         log.info("Registration request for user: {}", register.getUsername());
         response = userService.registerUser(register);
         if ((Integer) response.get("statusCode") == 201) {

@@ -2,6 +2,7 @@ package com.iotmining.services.auth.controller;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.UUID;
 
 import com.iotmining.services.auth.dto.UserCredentialDTO;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,7 +30,7 @@ public class AdminPanelController {
 
     @GetMapping("/getUserDetails")
     @RolesAllowed({"SUPER_ADMIN"})
-    public ResponseEntity<Map<String, Object>> getUserDetails(@RequestParam int page, @RequestParam int size) {
+    public ResponseEntity<Map<String, Object>> getUserDetails(@RequestParam("page") int page, @RequestParam("size") int size) {
         Map<String, Object> response = adminPanelService.getTuplesWithPagination(page, size);
         if (response == null) {
             response = Collections.emptyMap();
@@ -43,7 +44,7 @@ public class AdminPanelController {
     }
 
     @GetMapping("/revokeUser")
-    public Map<String, Object> revokeUserAccess(@RequestParam("user_id") Long user_id,
+    public Map<String, Object> revokeUserAccess(@RequestParam("user_id") UUID user_id,
                                                 @RequestParam("status") Boolean status) {
         return adminPanelService.revokeUserAccess(user_id, status);
     }

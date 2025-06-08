@@ -8,6 +8,9 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.UuidGenerator;
+
+import java.util.UUID;
 
 @Entity
 @Data
@@ -16,8 +19,9 @@ import lombok.NoArgsConstructor;
 public class Role {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long RoleId;
+    @UuidGenerator
+    @Column(name = "user_id", updatable = false, nullable = false)
+    private UUID roleId;
 
     @Column(nullable = false, unique = true)
     private String roleName;
