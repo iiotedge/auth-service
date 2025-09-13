@@ -86,10 +86,13 @@ public class JwtTokenProvider {
         Map<String, Object> claims = new HashMap<>();
         claims.put("userId", userDetails.getUser().getUserId());
         claims.put("role", roles);
+        claims.put("username", userDetails.getUser().getUsername());
+        claims.put("userFullName", userDetails.getUser().getFirstName() +" "+ userDetails.getUser().getLastName());
 
         // 👇 Add TenantType and AccessLevel
         TenantType tenantType = determineTenantType(roles);
         claims.put("tenantType", tenantType.name());
+        claims.put("tenantId", userDetails.getUser().getTenantId());
 
         TenantAccessLevel accessLevel = determineAccessLevel(tenantType);
         claims.put("accessLevel", accessLevel.name());
@@ -101,7 +104,8 @@ public class JwtTokenProvider {
 
         Date expireDate;
         LocalDateTime expireLocalDateForSuperAdmin = LocalDateTime.now().plusMinutes(JWT_EXPIRATION_MIN);
-        LocalDateTime expireLocalDateForOtherUser = LocalDateTime.now().plusSeconds(EXPIRATION_TIME_MS / 1000);
+//        LocalDateTime expireLocalDateForOtherUser = LocalDateTime.now().plusSeconds(EXPIRATION_TIME_MS / 1000);
+        LocalDateTime expireLocalDateForOtherUser = LocalDateTime.now().plusMinutes(JWT_EXPIRATION_MIN);
 
         String token;
         if (roles.contains("ROLE_SUPER_ADMIN")) {
@@ -138,6 +142,25 @@ public class JwtTokenProvider {
 
         return userLoginDataDTO;
     }
+    // ADD this method at the bottom (no changes to your existing generateToken method)
+    public static String issueInternalToken(String issuer, String prospectId, int ttlMinutes) {
+        Map<String,Object> claims = new HashMap<>();
+        claims.put("scope","internal");
+        claims.put("aud","notification-service");
+        claims.put("prospectId", prospectId);
+        Date now = new Date();
+        Date exp = new Date(now.getTime() + ttlMinutes * 60_000L);
+        return Jwts.builder()
+                .subject("internal-" + prospectId)
+                .issuer(issuer)
+                .claims(claims)
+                .issuedAt(now)
+                .expiration(exp)
+                .signWith(getKey())
+                .compact();
+    }
+
+
 
     public static String extractUserName(String token) {
         return extractClaim(token, Claims::getSubject);

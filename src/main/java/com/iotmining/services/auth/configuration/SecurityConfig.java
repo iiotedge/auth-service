@@ -52,7 +52,7 @@ public class SecurityConfig extends WsConfigurerAdapter {
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests((authorize) -> {
                     authorize
-                            .requestMatchers("/api/v1/auth/login", "/api/v1/auth/register",
+                            .requestMatchers("/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/register/verify", "/api/v1/auth/otp/resend",
                                     "/api/v1/auth/check-username", "/actuator/**", "/api/v1/auth/validate")
                             .permitAll();
                     authorize.requestMatchers("/swagger-ui/**", "/v3/api-docs/**", "/swagger-ui.html").permitAll();

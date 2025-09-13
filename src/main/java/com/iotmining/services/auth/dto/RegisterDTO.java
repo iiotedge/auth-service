@@ -1,6 +1,7 @@
 package com.iotmining.services.auth.dto;
 
 import java.util.List;
+import java.util.UUID;
 
 import com.iotmining.services.auth.interfaces.ValidateGender;
 import com.iotmining.services.auth.interfaces.ValidateMinimumAge;
@@ -48,7 +49,13 @@ public class RegisterDTO {
     private String email;
 
     @NotEmpty(message = "Phone No. is mandatory field")
-    @Pattern(regexp = "^[6789]\\d{9}$", message = "Invalid phone number")
+//    @Pattern(regexp = "^[6789]\\d{9}$", message = "Invalid phone number")
     private String phoneNumber;
 
+    private UUID parentTenantId;
+
+    // OPTIONAL: client can force the OTP channel when both identifiers exist.
+    // If provided, must be "SMS" or "EMAIL". Otherwise service will auto-pick (SMS > EMAIL).
+    @Pattern(regexp = "SMS|EMAIL", message = "otpChannel must be either SMS or EMAIL")
+    private String otpChannel;
 }
