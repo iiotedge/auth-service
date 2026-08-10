@@ -1,34 +1,49 @@
 package com.iotmining.services.auth.services;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 
+import com.iotmining.services.auth.repository.RefreshTokenRepository;
 import com.iotmining.services.auth.repository.UserLoginDataRepository;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-// import repository.com.iotmining.datafactory.auth.UserLoginDataRepository;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
+@RequiredArgsConstructor
+@Slf4j
 public class TokenCleanupService {
 
-    @Autowired
-     private UserLoginDataRepository tokenRepository;
+    private final UserLoginDataRepository tokenRepository;
+    private final RefreshTokenRepository refreshTokenRepository;
 
+    // Use a cron expression or fixedRate.
+    // fixedRate = 300000 (5 minutes) is usually better than 30s for database health.
     @Async
-    @Scheduled(fixedRate = 30000) // Run every 60 seconds (1 minute)
+    @Scheduled(fixedRateString = "${app.cleanup.token-interval:300000}")
+    @Transactional
     public void removeExpiredTokens() {
         LocalDateTime now = LocalDateTime.now();
 
-////         Option 1: Find expired tokens and delete them individually
-//         List<UserLoginData> expiredTokens = tokenRepository.findByTokenExpirationTimeBefore(now);
-//         if (!expiredTokens.isEmpty()) {
-//             tokenRepository.deleteAll(expiredTokens);
-//         }
+        try {
+            // This is efficient: it generates a "DELETE FROM ... WHERE time < ?" query
+            tokenRepository.deleteByTokenExpirationTimeBefore(now);
+            log.info("Cleanup Task: Expired login-data tokens removed at {}", now);
+        } catch (Exception e) {
+            log.error("Cleanup Task Failed", e);
+        }
 
-//         Option 2: Delete expired tokens directly in the repository
-         tokenRepository.deleteByTokenExpirationTimeBefore(now);
-
-        System.out.println("Expired tokens removed at " + now);
+        try {
+            // RefreshTokenService already deletes-and-replaces on every
+            // login/rotation, but a user who logs in once and never
+            // refreshes again would otherwise leave one expired row forever.
+            refreshTokenRepository.deleteByExpiryDateBefore(Instant.now());
+            log.info("Cleanup Task: Expired refresh tokens removed at {}", now);
+        } catch (Exception e) {
+            log.error("Refresh token cleanup failed", e);
+        }
     }
 }

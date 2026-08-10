@@ -12,11 +12,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: "*" # health,info,metrics,prometheus
-      server:
-        request:
-          autotime:
-            enabled:false
+        include: health,info,prometheus
       base-path: /actuator
     prometheus:
       enabled: true  # Make sure this is enabled
@@ -35,3 +31,16 @@ eureka:
     register-with-eureka: true
   instance:
     prefer-ip-address: true  # Use IP instead of hostname for discovery
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+
+iiotedge:
+  audit:
+    enabled: true
+    application-name: "iiotedge-auth-service"
+    kafka-topic: "audit.events.v1"
+
+# 7 Days in milliseconds
+app:
+  jwt:
+    refreshExpirationMs: 604800000

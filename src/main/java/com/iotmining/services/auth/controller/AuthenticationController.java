@@ -1,439 +1,228 @@
 package com.iotmining.services.auth.controller;
 
+import com.iotmining.services.auth.dto.AuthResponseDTO;
+import com.iotmining.services.auth.dto.OtpResendRequest;
+import com.iotmining.services.auth.dto.OtpVerifyRequest;
+import com.iotmining.services.auth.dto.RegisterDTO;
+import com.iotmining.services.auth.dto.UserCreateDTO;
+import com.iotmining.services.auth.dto.UserCredentialDTO;
+import com.iotmining.services.auth.dto.UserSummaryDTO;
 import com.iotmining.services.auth.annotation.RateLimited;
-import com.iotmining.services.auth.dto.*;
+import com.iotmining.services.auth.entity.RefreshToken;
+import com.iotmining.services.auth.security.UserPrincipal;
+import com.iotmining.services.auth.services.RefreshTokenService;
 import com.iotmining.services.auth.services.UserService;
 import com.iotmining.services.auth.util.JwtTokenProvider;
-import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.media.Content;
-import io.swagger.v3.oas.annotations.media.Schema;
-import io.swagger.v3.oas.annotations.responses.ApiResponse;
-import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.jsonwebtoken.Claims;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
-import lombok.extern.log4j.Log4j2;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
-import org.springframework.validation.BindingResult;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.CookieValue;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 
 @RestController
-@RequestMapping(value = "/api/v1/auth")
-@Log4j2
+@RequestMapping("/api/v1/auth")
+@RequiredArgsConstructor
 public class AuthenticationController {
 
-    @Autowired
-    private UserService userService;
+    private static final String REFRESH_COOKIE_NAME = "refresh_token";
+    private static final String REFRESH_COOKIE_PATH = "/api/v1/auth";
 
-    @PostMapping("/login")
-    @Operation(summary = "Login, with credentials", description = "Returns a login token")
-    @ApiResponses({
-            @ApiResponse(responseCode = "200", description = "Login successful", content = @Content(mediaType = "application/json", schema = @Schema(implementation = Map.class))),
-            @ApiResponse(responseCode = "401", description = "Invalid credentials", content = @Content(mediaType = "application/json")),
-            @ApiResponse(responseCode = "500", description = "Internal Server Error", content = @Content(mediaType = "application/json"))
-    })
+    private final UserService userService;
+    private final RefreshTokenService refreshTokenService;
+
     @RateLimited
-    public ResponseEntity<Map<String, Object>> login(@RequestBody @Valid UserCredentialDTO loginRequest) {
-        log.info("Login attempt for user: {}", loginRequest.getUsername());
-        Map<String, Object> response = userService.verify(loginRequest);
-        if ((Integer) response.get("statusCode") == 200) {
-            log.info("Login successful for user: {}", loginRequest.getUsername());
-            return new ResponseEntity<>(response, HttpStatus.OK);
-        } else if ((Integer) response.get("statusCode") == 500) {
-            log.warn("[Server Error] Failed login attempt for user: {}", loginRequest.getUsername());
-            return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
-        } else {
-            log.warn("Failed login attempt for user: {}", loginRequest.getUsername());
-            return new ResponseEntity<>(response, HttpStatus.UNAUTHORIZED);
+    @PostMapping("/login")
+    public ResponseEntity<Map<String, Object>> login(@Valid @RequestBody UserCredentialDTO credentials,
+                                                       HttpServletRequest request) {
+        Map<String, Object> result = userService.verify(credentials);
+        int statusCode = (Integer) result.get("statusCode");
+
+        if (statusCode == HttpStatus.OK.value() && result.get("data") instanceof AuthResponseDTO authResponse) {
+            UUID userId = UUID.fromString(JwtTokenProvider.extractUserId(authResponse.getAccessToken()));
+            RefreshToken refreshToken = refreshTokenService.createRefreshToken(userId, resolveClientIp(request));
+            return ResponseEntity.status(statusCode)
+                    .header(HttpHeaders.SET_COOKIE, buildRefreshCookie(refreshToken).toString())
+                    .body(result);
         }
+
+        return ResponseEntity.status(statusCode).body(result);
     }
 
-    @GetMapping("/validate")
-    @Operation(summary = "Validate Token", description = "Validates the JWT authentication token.")
-    @ApiResponses({
-            @ApiResponse(responseCode = "200", description = "Token is valid"),
-            @ApiResponse(responseCode = "401", description = "Invalid or expired token")
-    })
-    public ResponseEntity<?> validate(@RequestHeader("Authorization") String token) {
-        log.info("Token validation request received");
-        if (JwtTokenProvider.validateToken(token.replace("Bearer ", ""))) {
-            log.info("Token is valid");
-            return ResponseEntity.ok().build();
-        } else {
-            log.warn("Token validation failed");
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+    @PostMapping("/refresh")
+    public ResponseEntity<Map<String, Object>> refresh(
+            @CookieValue(name = REFRESH_COOKIE_NAME, required = false) String refreshTokenCookie,
+            HttpServletRequest request) {
+
+        if (refreshTokenCookie == null || refreshTokenCookie.isBlank()) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("statusCode", 400, "message", "Refresh Token Cookie missing"));
         }
+
+        Optional<RefreshToken> tokenOpt = refreshTokenService.findByToken(refreshTokenCookie);
+        if (tokenOpt.isEmpty()) {
+            return clearedCookieResponse("Refresh token not found, please login again.");
+        }
+
+        RefreshToken token = tokenOpt.get();
+        String clientIp = resolveClientIp(request);
+        if (token.getIpAddress() != null && !token.getIpAddress().equals(clientIp)) {
+            refreshTokenService.deleteByToken(token.getToken());
+            return clearedCookieResponse("Unusual activity detected, please login again.");
+        }
+
+        try {
+            refreshTokenService.verifyExpiration(token);
+        } catch (RuntimeException e) {
+            return clearedCookieResponse("Invalid or Expired Refresh Token");
+        }
+
+        RefreshToken rotated = refreshTokenService.rotateRefreshToken(token);
+        String newAccessToken = JwtTokenProvider.generateAccessToken(token.getUser());
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("accessToken", newAccessToken);
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.SET_COOKIE, buildRefreshCookie(rotated).toString())
+                .body(body);
     }
 
     @PostMapping("/logout")
-    @Operation(summary = "User Logout", description = "Invalidates the authentication token and logs out the user.")
-    @ApiResponses({
-            @ApiResponse(responseCode = "200", description = "Logout successful"),
-            @ApiResponse(responseCode = "400", description = "Token not provided")
-    })
-    public ResponseEntity<?> logout(@RequestHeader("Authorization") String token) {
-        if (token != null) {
-            log.info("Logout request received with token");
-            // logoutService.blacklistToken(token);
-        } else {
-            log.warn("Logout request received without token");
-            return ResponseEntity.badRequest().body("Token not provided");
+    public ResponseEntity<Map<String, Object>> logout(
+            @CookieValue(name = REFRESH_COOKIE_NAME, required = false) String refreshTokenCookie) {
+        if (refreshTokenCookie != null && !refreshTokenCookie.isBlank()) {
+            refreshTokenService.deleteByToken(refreshTokenCookie);
         }
-        log.info("Logout successful");
-        return ResponseEntity.ok("Logout successful!");
+        return ResponseEntity.ok()
+                .header(HttpHeaders.SET_COOKIE, clearRefreshCookie().toString())
+                .body(Map.of("message", "Logout successful"));
     }
 
-    // ===== OTP Registration (pre-tenant) =====
+    @GetMapping("/validate")
+    public ResponseEntity<Void> validate(
+            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        String token = authHeader.substring(7);
+        if (!Boolean.TRUE.equals(JwtTokenProvider.validateToken(token))) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        Claims claims = JwtTokenProvider.extractAllClaims(token);
+        return ResponseEntity.ok()
+                .header("X-User-Id", claims.getSubject())
+                .header("X-Tenant-Id", claims.get("tenantId", String.class))
+                .build();
+    }
+
+    @RateLimited
     @PostMapping("/register")
-    @Operation(summary = "User Registration (OTP init)", description = "Generates OTP and stores pending registration.")
-    @ApiResponses({
-            @ApiResponse(responseCode = "202", description = "OTP sent", content = @Content(mediaType = "application/json", schema = @Schema(implementation = Map.class))),
-            @ApiResponse(responseCode = "409", description = "Username already exists"),
-            @ApiResponse(responseCode = "400", description = "Invalid request data")
-    })
-    @RateLimited
-    public ResponseEntity<Map<String, Object>> register(@RequestBody @Valid RegisterDTO register, BindingResult result) {
-        Map<String, Object> response = new HashMap<>();
-        if (result.hasErrors()) {
-            response.put("statusCode", 400);
-            response.put("error", result.getAllErrors().toString());
-            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-        }
-        Map<String, Object> resp = userService.registerInit(register);
-        int sc = (Integer) resp.getOrDefault("statusCode", 202);
-        return new ResponseEntity<>(resp,
-                sc == 202 ? HttpStatus.ACCEPTED :
-                        sc == 409 ? HttpStatus.CONFLICT : HttpStatus.BAD_REQUEST);
+    public ResponseEntity<Map<String, Object>> register(@Valid @RequestBody RegisterDTO request) {
+        Map<String, Object> result = userService.registerInit(request);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
     }
 
+    @RateLimited
     @PostMapping("/register/verify")
-    @Operation(summary = "Verify OTP", description = "Verifies OTP and creates user via TMS.")
-    @ApiResponses({
-            @ApiResponse(responseCode = "201", description = "User created"),
-            @ApiResponse(responseCode = "400", description = "Invalid/expired OTP"),
-            @ApiResponse(responseCode = "404", description = "Pending user not found")
-    })
-    @RateLimited
-    public ResponseEntity<Map<String, Object>> verifyOtp(@RequestBody @Valid OtpVerifyRequest req) {
-        Map<String, Object> resp = userService.verifyOtp(req);
-        int sc = (Integer) resp.getOrDefault("statusCode", 200);
-        return new ResponseEntity<>(resp,
-                sc == 201 ? HttpStatus.CREATED :
-                        sc == 200 ? HttpStatus.OK :
-                                sc == 404 ? HttpStatus.NOT_FOUND : HttpStatus.BAD_REQUEST);
+    public ResponseEntity<Map<String, Object>> verifyOtp(@Valid @RequestBody OtpVerifyRequest request) {
+        Map<String, Object> result = userService.verifyOtp(request);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
     }
 
-    @PostMapping("/otp/resend")
-    @Operation(summary = "Resend OTP", description = "Resends OTP with rate limiting.")
-    @ApiResponses({
-            @ApiResponse(responseCode = "202", description = "OTP resent"),
-            @ApiResponse(responseCode = "429", description = "Too many requests"),
-            @ApiResponse(responseCode = "404", description = "Pending user not found")
-    })
     @RateLimited
-    public ResponseEntity<Map<String, Object>> resendOtp(@RequestBody @Valid OtpResendRequest req) {
-        Map<String, Object> resp = userService.resendOtp(req);
-        int sc = (Integer) resp.getOrDefault("statusCode", 202);
-        return new ResponseEntity<>(resp,
-                sc == 202 ? HttpStatus.ACCEPTED :
-                        sc == 404 ? HttpStatus.NOT_FOUND :
-                                sc == 429 ? HttpStatus.TOO_MANY_REQUESTS : HttpStatus.BAD_REQUEST);
+    @PostMapping("/otp/resend")
+    public ResponseEntity<Map<String, Object>> resendOtp(@Valid @RequestBody OtpResendRequest request) {
+        Map<String, Object> result = userService.resendOtp(request);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    @PostMapping("/users")
+    @PreAuthorize("hasAnyRole('ADMIN','SUPER_ADMIN')")
+    public ResponseEntity<Map<String, Object>> addUserToMyTenant(@Valid @RequestBody UserCreateDTO request,
+                                                                   Authentication authentication) {
+        UUID tenantId = ((UserPrincipal) authentication.getPrincipal()).getUser().getTenantId();
+        Map<String, Object> result = userService.createUserInternal(request, tenantId);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    // SUPER_ADMIN only: lets a caller create a user in an arbitrary tenant by id.
+    @PostMapping("/tenants/{tenantId}/users")
+    @PreAuthorize("hasRole('SUPER_ADMIN')")
+    public ResponseEntity<Map<String, Object>> addUserToTenant(@PathVariable UUID tenantId,
+                                                                 @Valid @RequestBody UserCreateDTO request) {
+        Map<String, Object> result = userService.createUserInternal(request, tenantId);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    @GetMapping("/tenants/{tenantId}/users-list")
+    public ResponseEntity<List<UserSummaryDTO>> listTenantUsers(@PathVariable UUID tenantId,
+                                                                  Authentication authentication) {
+        UserPrincipal caller = (UserPrincipal) authentication.getPrincipal();
+        boolean isSuperAdmin = caller.getAuthorities().stream()
+                .anyMatch(authority -> authority.getAuthority().equals("ROLE_SUPER_ADMIN"));
+
+        if (!isSuperAdmin && !tenantId.equals(caller.getUser().getTenantId())) {
+            throw new AccessDeniedException("Not authorized to view users for this tenant.");
+        }
+
+        return ResponseEntity.ok(userService.findUsersByTenantId(tenantId));
+    }
+
+    private ResponseEntity<Map<String, Object>> clearedCookieResponse(String message) {
+        return ResponseEntity.ok()
+                .header(HttpHeaders.SET_COOKIE, clearRefreshCookie().toString())
+                .body(Map.of("statusCode", 200, "message", message));
+    }
+
+    private ResponseCookie buildRefreshCookie(RefreshToken refreshToken) {
+        long maxAgeSeconds = Math.max(0,
+                refreshToken.getExpiryDate().getEpochSecond() - java.time.Instant.now().getEpochSecond());
+        return ResponseCookie.from(REFRESH_COOKIE_NAME, refreshToken.getToken())
+                .httpOnly(true)
+                .secure(true)
+                .sameSite("Strict")
+                .path(REFRESH_COOKIE_PATH)
+                .maxAge(maxAgeSeconds)
+                .build();
+    }
+
+    private ResponseCookie clearRefreshCookie() {
+        return ResponseCookie.from(REFRESH_COOKIE_NAME, "")
+                .httpOnly(true)
+                .secure(true)
+                .sameSite("Strict")
+                .path(REFRESH_COOKIE_PATH)
+                .maxAge(0)
+                .build();
+    }
+
+    private String resolveClientIp(HttpServletRequest request) {
+        String forwardedFor = request.getHeader("X-Forwarded-For");
+        if (forwardedFor != null && !forwardedFor.isBlank()) {
+            return forwardedFor.split(",")[0].trim();
+        }
+        return request.getRemoteAddr();
     }
 }
-
-//package com.iotmining.services.auth.controller;
-//
-//import com.iotmining.services.auth.annotation.RateLimited;
-//import com.iotmining.services.auth.dto.RegisterDTO;
-//import com.iotmining.services.auth.dto.UserCredentialDTO;
-//import com.iotmining.services.auth.services.UserService;
-//import com.iotmining.services.auth.util.JwtTokenProvider;
-//import io.swagger.v3.oas.annotations.Operation;
-//import io.swagger.v3.oas.annotations.media.Content;
-//import io.swagger.v3.oas.annotations.media.Schema;
-//import io.swagger.v3.oas.annotations.responses.ApiResponse;
-//import io.swagger.v3.oas.annotations.responses.ApiResponses;
-//import jakarta.validation.Valid;
-//import lombok.extern.log4j.Log4j2;
-//import org.springframework.beans.factory.annotation.Autowired;
-//import org.springframework.http.HttpStatus;
-//import org.springframework.http.ResponseEntity;
-//import org.springframework.validation.BindingResult;
-//import org.springframework.web.bind.annotation.*;
-//
-//import java.util.HashMap;
-//import java.util.Map;
-//
-//@RestController
-//@RequestMapping(value = "/api/v1/auth")
-//@Log4j2
-//public class AuthenticationController {
-//
-//    @Autowired
-//    private UserService userService;
-//
-//    /**
-//     * Logs in a user with the given username and password.
-//     *
-//     * @param loginRequest The username and password of the user
-//     * @return JWT token as a string if authentication is successful
-//     */
-//    @PostMapping("/login")
-//    @Operation(summary = "Login, with credentials", description = "Returns a login token")
-//    @ApiResponses({
-//            @ApiResponse(responseCode = "200", description = "Login successful", content = @Content(mediaType = "application/json", schema = @Schema(implementation = Map.class))),
-//            @ApiResponse(responseCode = "401", description = "Invalid credentials", content = @Content(mediaType = "application/json")),
-//            @ApiResponse(responseCode = "500", description = "Internal Server Error", content = @Content(mediaType = "application/json"))
-//    })
-//    @RateLimited
-//    public ResponseEntity<Map<String, Object>> login(@RequestBody @Valid UserCredentialDTO loginRequest) {
-//
-//        log.info("Login attempt for user: {}", loginRequest.getUsername());
-//
-//        Map<String, Object> response = userService.verify(loginRequest);
-//        if ((Integer) response.get("statusCode") == 200) {
-//            log.info("Login successful for user: {}", loginRequest.getUsername());
-//            return new ResponseEntity<>(response, HttpStatus.OK);
-//        } else if ((Integer) response.get("statusCode") == 500) {
-//            log.warn("[Server Error] Failed login attempt for user: {}", loginRequest.getUsername());
-//            return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
-//        } else {
-//            log.warn("Failed login attempt for user: {}", loginRequest.getUsername());
-//            return new ResponseEntity<>(response, HttpStatus.UNAUTHORIZED);
-//        }
-//    }
-//
-//    /**
-//     * Validates an authentication token.
-//     *
-//     * @param token The JWT token to be validated
-//     * @return HTTP 200 if valid, otherwise HTTP 401
-//     */
-//    @GetMapping("/validate")
-//    @Operation(summary = "Validate Token", description = "Validates the JWT authentication token.")
-//    @ApiResponses({
-//            @ApiResponse(responseCode = "200", description = "Token is valid"),
-//            @ApiResponse(responseCode = "401", description = "Invalid or expired token")
-//    })
-//    public ResponseEntity<?> validate(@RequestHeader("Authorization") String token) {
-//        log.info("Token validation request received");
-//        if (JwtTokenProvider.validateToken(token.replace("Bearer ", ""))) {
-//            log.info("Token is valid");
-//            return ResponseEntity.ok().build();
-//        } else {
-//            log.warn("Token validation failed");
-//            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
-//        }
-//    }
-//
-//    /**
-//     * Logs out a user by invalidating their token.
-//     *
-//     * @param token The JWT token to be invalidated
-//     * @return HTTP 200 if logout is successful
-//     */
-//    @PostMapping("/logout")
-//    @Operation(summary = "User Logout", description = "Invalidates the authentication token and logs out the user.")
-//    @ApiResponses({
-//            @ApiResponse(responseCode = "200", description = "Logout successful"),
-//            @ApiResponse(responseCode = "400", description = "Token not provided")
-//    })
-//    public ResponseEntity<?> logout(@RequestHeader("Authorization") String token) {
-//        if (token != null) {
-//            log.info("Logout request received with token");
-//            // logoutService.blacklistToken(token);
-//        } else {
-//            log.warn("Logout request received without token");
-//            return ResponseEntity.badRequest().body("Token not provided");
-//        }
-//        log.info("Logout successful");
-//        return ResponseEntity.ok("Logout successful!");
-//    }
-//
-//    /**
-//     * Registers a new user.
-//     *
-//     * @param register The registration details
-//     * @return HTTP 201 if registration is successful, otherwise appropriate HTTP status
-//     */
-//    @PostMapping("/register")
-//    @Operation(summary = "User Registration", description = "Registers a new user with a unique username and password.")
-//    @ApiResponses({
-//            @ApiResponse(responseCode = "201", description = "User registered successfully", content = @Content(mediaType = "application/json", schema = @Schema(implementation = Map.class))),
-//            @ApiResponse(responseCode = "409", description = "Username already exists"),
-//            @ApiResponse(responseCode = "400", description = "Invalid request data")
-//    })
-//    public ResponseEntity<Map<String, Object>> register(@RequestBody @Valid RegisterDTO register, BindingResult result) {
-//        Map<String, Object> response = new HashMap<>();
-//        if (result.hasErrors()) {
-//            response.put("Error", result.getAllErrors().toString());
-//            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-//        }
-//        log.info("Registration request for user: {}", register.getUsername());
-//        response = userService.registerUser(register);
-//        if ((Integer) response.get("statusCode") == 201) {
-//            log.info("User registered successfully: {}", register.getUsername());
-//            return new ResponseEntity<>(response, HttpStatus.CREATED);
-//        } else if ((Integer) response.get("statusCode") == 409) {
-//            log.warn("Username already exists, Failed register attempt for user: {}", register.getUsername());
-//            return new ResponseEntity<>(response, HttpStatus.CONFLICT);
-//        } else {
-//            log.warn("User registration failed: {}", register.getUsername());
-//            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-//        }
-//    }
-//}
-//
-////package com.iotmining.services.auth.controller;
-////
-////import com.iotmining.services.auth.annotation.RateLimited;
-////import com.iotmining.services.auth.util.JwtTokenProvider;
-////import io.swagger.v3.oas.annotations.media.Content;
-////import io.swagger.v3.oas.annotations.media.Schema;
-////import io.swagger.v3.oas.annotations.responses.ApiResponse;
-////import io.swagger.v3.oas.annotations.responses.ApiResponses;
-////import lombok.extern.log4j.Log4j2;
-////import org.springframework.beans.factory.annotation.Autowired;
-////import org.springframework.http.HttpStatus;
-////import org.springframework.http.ResponseEntity;
-////import org.springframework.validation.BindingResult;
-////import org.springframework.web.bind.annotation.GetMapping;
-////import org.springframework.web.bind.annotation.PostMapping;
-////import org.springframework.web.bind.annotation.RequestBody;
-////import org.springframework.web.bind.annotation.RequestHeader;
-////import org.springframework.web.bind.annotation.RequestMapping;
-////import org.springframework.web.bind.annotation.RestController;
-////
-////import com.iotmining.services.auth.services.UserService;
-////import com.iotmining.services.auth.dto.RegisterDTO;
-////import com.iotmining.services.auth.dto.UserCredentialDTO;
-////
-////import io.swagger.v3.oas.annotations.Operation;
-////import jakarta.validation.Valid;
-////
-////import java.util.Map;
-////
-////@RestController
-////@RequestMapping(value = "/api/v1/auth")
-////@Log4j2
-////public class AuthenticationController {
-////
-////    @Autowired
-////    private UserService userService;
-////
-////    private Map<String, Object> response;
-////
-////    /**
-////     * Logs in a user with the given username and password.
-////     *
-////     * @param loginRequest The username and password of the user
-////     * @return JWT token as a string if authentication is successful
-////     */
-////    @PostMapping("/login")
-////    @Operation(summary = "Login, with credentials", description = "Returns a login token")
-////    @ApiResponses({
-////            @ApiResponse(responseCode = "200", description = "Login successful", content = @Content(mediaType = "application/json", schema = @Schema(implementation = Map.class))),
-////            @ApiResponse(responseCode = "401", description = "Invalid credentials", content = @Content(mediaType = "application/json")),
-////            @ApiResponse(responseCode = "500", description = "Internal Server Error", content = @Content(mediaType = "application/json"))
-////    })
-////    @RateLimited
-////    public ResponseEntity<Map<String, Object>> login(@RequestBody @Valid UserCredentialDTO loginRequest) {
-////
-////        log.info("Login attempt for user: {}", loginRequest.getUsername());
-////
-////        response = userService.verify(loginRequest);
-////        if ((Integer) response.get("statusCode") == 200) {
-////            log.info("Login successful for user: {}", loginRequest.getUsername());
-////            return new ResponseEntity<>(response, HttpStatus.OK);
-////        }
-////        else if ((Integer) response.get("statusCode") == 500) {
-////            log.warn("[Server Error] Failed login attempt for user: {}", loginRequest.getUsername());
-////            return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
-////        } else {
-////            log.warn("Failed login attempt for user: {}", loginRequest.getUsername());
-////            return new ResponseEntity<>(response, HttpStatus.UNAUTHORIZED);
-////        }
-////    }
-////
-////    /**
-////     * Validates an authentication token.
-////     *
-////     * @param token The JWT token to be validated
-////     * @return HTTP 200 if valid, otherwise HTTP 401
-////     */
-////    @GetMapping("/validate")
-////    @Operation(summary = "Validate Token", description = "Validates the JWT authentication token.")
-////    @ApiResponses({
-////            @ApiResponse(responseCode = "200", description = "Token is valid"),
-////            @ApiResponse(responseCode = "401", description = "Invalid or expired token")
-////    })
-////    public ResponseEntity<?> validate(@RequestHeader("Authorization") String token) {
-////        log.info("Token validation request received");
-////        if (JwtTokenProvider.validateToken(token.replace("Bearer ", ""))) {
-////            log.info("Token is valid");
-////            return ResponseEntity.ok().build();
-////        } else {
-////            log.warn("Token validation failed");
-////            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
-////        }
-////    }
-////
-////    /**
-////     * Logs out a user by invalidating their token.
-////     *
-////     * @param token The JWT token to be invalidated
-////     * @return HTTP 200 if logout is successful
-////     */
-////    @PostMapping("/logout")
-////    @Operation(summary = "User Logout", description = "Invalidates the authentication token and logs out the user.")
-////    @ApiResponses({
-////            @ApiResponse(responseCode = "200", description = "Logout successful"),
-////            @ApiResponse(responseCode = "400", description = "Token not provided")
-////    })
-////    public ResponseEntity<?> logout(@RequestHeader("Authorization") String token) {
-////        if (token != null) {
-////            log.info("Logout request received with token");
-////            // logoutService.blacklistToken(token);
-////        } else {
-////            log.warn("Logout request received without token");
-////            return ResponseEntity.badRequest().body("Token not provided");
-////        }
-////        log.info("Logout successful");
-////        return ResponseEntity.ok("Logout successful!");
-////    }
-////
-////    /**
-////     * Registers a new user.
-////     *
-////     * @param register The registration details
-////     * @return HTTP 201 if registration is successful, otherwise appropriate HTTP status
-////     */
-////    @PostMapping("/register")
-////    @Operation(summary = "User Registration", description = "Registers a new user with a unique username and password.")
-////    @ApiResponses({
-////            @ApiResponse(responseCode = "201", description = "User registered successfully", content = @Content(mediaType = "application/json", schema = @Schema(implementation = Map.class))),
-////            @ApiResponse(responseCode = "409", description = "Username already exists"),
-////            @ApiResponse(responseCode = "400", description = "Invalid request data")
-////    })
-////    public ResponseEntity<Map<String, Object>> register(@RequestBody @Valid RegisterDTO register, BindingResult result) {
-////        if (result.hasErrors()) {
-////            response.put("Error", result.getAllErrors().toString());
-////            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-////        }
-////        log.info("Registration request for user: {}", register.getUsername());
-////        response = userService.registerUser(register);
-////        if ((Integer) response.get("statusCode") == 201) {
-////            log.info("User registered successfully: {}", register.getUsername());
-////            return new ResponseEntity<>(response, HttpStatus.CREATED);
-////        } else if ((Integer) response.get("statusCode") == 409) {
-////            log.warn("Username already exists, Failed register attempt for user: {}", register.getUsername());
-////            return new ResponseEntity<>(response, HttpStatus.CONFLICT);
-////        } else {
-////            log.warn("User registration failed: {}", register.getUsername());
-////            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-////        }
-////    }
-////}

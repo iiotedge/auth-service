@@ -3,32 +3,43 @@ package com.iotmining.services.auth.services;
 import com.iotmining.services.auth.dto.UserLoginDataDTO;
 import com.iotmining.services.auth.entity.UserLoginData;
 import com.iotmining.services.auth.repository.UserLoginDataRepository;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
+@RequiredArgsConstructor
+@Slf4j
 public class UserLoginDataService {
 
-    @Autowired
-    UserLoginDataRepository userLoginDataRepository;
+    private final UserLoginDataRepository userLoginDataRepository;
 
+    /**
+     * Async method to log login events.
+     * Uses REQUIRES_NEW propagation to ensure it commits even if the main transaction rolls back (optional choice).
+     */
     @Async
-    public void addUserAsyncLoginData(UserLoginDataDTO request) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void addUserAsyncLoginData(UserLoginDataDTO dto) {
+        try {
+            UserLoginData entity = new UserLoginData();
+            entity.setAccessToken(dto.getConfirmationToken());
+            entity.setTokenGenerationTimestamp(dto.getTokenGenerationTimestamp());
+            entity.setTokenExpirationTime(dto.getTokenExpirationTime());
+            entity.setIsUserLoggedIn(dto.getIsUserLoggedIn());
+            entity.setUser(dto.getUser());
 
-        UserLoginData userLoginData = new UserLoginData();
-        userLoginData.setUser(request.getUser());
-        // user.setUserId(request.getUserId());
-        userLoginData.setPasswordSalt(request.getPasswordSalt());
-        userLoginData.setHashAlgorithmId(request.getHashAlgorithmId());
-        userLoginData.setConfirmationToken(request.getConfirmationToken());
-        userLoginData.setTokenExpirationTime(request.getTokenExpirationTime());
-        userLoginData.setTokenGenerationTimestamp(request.getTokenGenerationTimestamp());
-        userLoginData.setEmailValidationStatusId(request.getEmailValidationStatusId());
-        userLoginData.setPasswordRecoveryToken(request.getPasswordRecoveryToken());
-        userLoginData.setRecoveryTokenTime(request.getRecoveryTokenTime());
-        userLoginData.setIsUserLoggedIn(request.getIsUserLoggedIn());
+            userLoginDataRepository.save(entity);
+            log.debug("Async login data saved for user: {}", dto.getUser().getUsername());
 
-        userLoginDataRepository.save(userLoginData);
+        } catch (Exception e) {
+            // We catch exceptions here because we don't want a logging failure
+            // to crash the user's login experience.
+            log.error("Failed to save async login data", e);
+        }
     }
 }
+

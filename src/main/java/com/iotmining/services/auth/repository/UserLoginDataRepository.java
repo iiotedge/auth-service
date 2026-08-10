@@ -1,22 +1,17 @@
 package com.iotmining.services.auth.repository;
 
-import java.time.LocalDateTime;
-import java.util.List;
-import java.util.Optional;
-import java.util.UUID;
-
+import com.iotmining.services.auth.entity.UserLoginData;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
-import com.iotmining.services.auth.entity.UserLoginData;
+import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Repository
 public interface UserLoginDataRepository extends JpaRepository<UserLoginData, UUID> {
-    public Optional<UserLoginData> username(final String Username);
-
-    // Find tokens that have expired
-    List<UserLoginData> findByTokenExpirationTimeBefore(LocalDateTime now);
-
-    // You can also add a method to delete expired tokens directly if needed
-    void deleteByTokenExpirationTimeBefore(LocalDateTime now);
+    // Define the delete method signature
+    // @Modifying is implied for derived delete methods in recent Spring versions,
+    // but explicit @Transactional is usually handled at the Service level.
+    void deleteByTokenExpirationTimeBefore(LocalDateTime time);
 }
+

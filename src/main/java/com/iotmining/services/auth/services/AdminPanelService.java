@@ -8,6 +8,7 @@ import com.iotmining.services.auth.entity.UserLoginData;
 import com.iotmining.services.auth.repository.UserLoginDataRepository;
 import com.iotmining.services.auth.repository.UserRepository;
 import jakarta.persistence.EntityNotFoundException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
@@ -15,12 +16,10 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
-// import repository.com.iotmining.datafactory.auth.UserLoginDataRepository;
-// import repository.com.iotmining.datafactory.auth.UserRepository;
-
 import jakarta.annotation.security.RolesAllowed;
 import org.springframework.web.client.RestTemplate;
 
+@Slf4j
 @Service
 @RolesAllowed({"ROLE_SUPER_ADMIN"})
 public class AdminPanelService {
@@ -152,7 +151,8 @@ public class AdminPanelService {
                                     user.put("lastName", userDetails.getLastName());
                                     // Add other fields as needed
                                 }
-                            } catch (Exception ignore) {
+                            } catch (Exception e) {
+                                log.debug("Skipping malformed user node while enriching company tree: {}", e.getMessage());
                             }
                         }
                     }

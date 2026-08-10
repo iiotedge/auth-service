@@ -21,31 +21,38 @@ spring:
   redis:
     host: ${REDIS_HOST:redis}           # From Kubernetes ConfigMap or default to 'redis'
     port: ${REDIS_PORT:6379}            # Default Redis port
-    password: ${REDIS_PASSWORD:8506}    # Use K8s Secret in production
+    password: ${REDIS_PASSWORD}         # Required - no fallback, use a K8s Secret in production
     timeout: ${REDIS_TIMEOUT:2000}      # Connection timeout (ms)
-
-    redis:
-      pool:
-        max-active: ${REDIS_POOL_MAX_ACTIVE:10}
-        max-idle: ${REDIS_POOL_MAX_IDLE:5}
-        min-idle: ${REDIS_POOL_MIN_IDLE:1}
-        max-wait: ${REDIS_POOL_MAX_WAIT:2000} # in ms
 
 rate:
   limit:
-    max-requests: ${RATE_LIMIT_MAX_REQUESTS:10}            # Default: 10 requests
-    time-window-seconds: ${RATE_LIMIT_TIME_WINDOW:60}      # 60s = 1 minute
+    max-requests: ${RATE_LIMIT_MAX_REQUESTS:10}                 # Default: 10 requests
+    # RateLimitAspect reads this as minutes, not seconds - this key
+    # previously read "time-window-seconds", which RateLimitAspect never
+    # looked up, so this setting was silently ignored in prod.
+    time-window: ${RATE_LIMIT_TIME_WINDOW_MINUTES:1}            # 1 minute window
     error-message: ${RATE_LIMIT_ERROR_MESSAGE:Too many requests. Please try again in a few seconds.}
 
 cors:
-  allowed-origins: ${ALLOWED_CORS_ORIGINS:http://localhost:3000}
+  allowed-origins: ${ALLOWED_CORS_ORIGINS:https://iiotedge.in,https://demo.iiotedge.in}
 
 tenant:
   service:
-    url: ${TMS_SERVICE_URL:http://localhost:8081/api/v1/tenants}
+    url: ${TMS_SERVICE_URL:http://localhost:9061/api/v1/tenants}
 
+notification:
+  service:
+    url: ${NOTIFICATION_SERVICE_URL:http://localhost:9059}
+
+# Required - no fallback. The dev profile's secret is a known, published
+# value; letting prod silently fall back to it if the env var is unset
+# would mean prod validates tokens signed with a publicly-visible key.
 jwt:
-  secret: ${JWT_SECRET_KEY_BASE64:Vlo2vcFdiXGgWqZLEpLw6kk99sH8/4odgC2XgZV0IbA=}
+  secret: ${JWT_SECRET_KEY_BASE64}
+
+admin:
+  seed:
+    password: ${SUPER_ADMIN_PASSWORD:}
 
 server:
   port: 9051

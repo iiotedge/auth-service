@@ -1,43 +1,33 @@
 package com.iotmining.services.auth.services;
 
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
-
 import com.iotmining.services.auth.entity.Role;
-
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.EntityManagerFactory;
+import com.iotmining.services.auth.repository.RoleRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
 @Service
+@RequiredArgsConstructor
+@Slf4j
 public class RoleService {
 
-    @Autowired
-    private EntityManagerFactory entityManagerFactory;
+    private final RoleRepository roleRepository;
 
+    @Transactional
     public void insertRolesInAllShards(List<String> roles) {
-        insertRolesInShard(entityManagerFactory, roles);
-    }
-
-    private void insertRolesInShard(EntityManagerFactory entityManagerFactory, List<String> roles) {
-        EntityManager entityManager = entityManagerFactory.createEntityManager();
-        entityManager.getTransaction().begin();
-
-        try {
-            for (String roleName : roles) {
-                if (entityManager.createQuery("SELECT r FROM Role r WHERE r.roleName  = :roleName", Role.class)
-                        .setParameter("roleName", roleName)
-                        .getResultList().isEmpty()) {
-                    entityManager.persist(new Role(roleName));
+        for (String roleName : roles) {
+            if (!roleRepository.existsByName(roleName)) {
+                try {
+                    roleRepository.save(new Role(roleName));
+                    log.info("Initialized role: {}", roleName);
+                } catch (Exception e) {
+                    log.error("Failed to initialize role: {}", roleName, e);
                 }
             }
-            entityManager.getTransaction().commit();
-        } catch (Exception e) {
-            entityManager.getTransaction().rollback();
-            throw e;
-        } finally {
-            entityManager.close();
         }
     }
 }
+

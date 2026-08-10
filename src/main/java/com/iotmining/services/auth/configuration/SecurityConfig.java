@@ -1,86 +1,76 @@
 package com.iotmining.services.auth.configuration;
 
+import com.iotmining.services.auth.util.JwtAuthenticationEntryPoint;
 import com.iotmining.services.auth.util.JwtAuthenticationFilter;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.AuthenticationProvider;
-import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
-import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import org.springframework.stereotype.Component;
 import org.springframework.web.cors.CorsConfigurationSource;
-import org.springframework.ws.config.annotation.WsConfigurerAdapter;
 
-import com.iotmining.services.auth.services.CustomUserDetailsService;
-
-@Component
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity(prePostEnabled = true)  // Must be enabled for @PreAuthorize
-public class SecurityConfig extends WsConfigurerAdapter {
+@EnableMethodSecurity(prePostEnabled = true, jsr250Enabled = true)
+@RequiredArgsConstructor
+public class SecurityConfig {
 
-    @Autowired
-    private JwtAuthenticationFilter authenticationFilter;
+    private static final String[] PUBLIC_ENDPOINTS = {
+            "/api/v1/auth/login",
+            "/api/v1/auth/register",
+            "/api/v1/auth/register/verify",
+            "/api/v1/auth/otp/resend",
+            "/api/v1/auth/refresh",
+            "/api/v1/auth/logout",
+            "/api/v1/auth/validate",
+            "/actuator/health",
+            "/v3/api-docs/**",
+            "/swagger-ui/**",
+            "/swagger-ui.html"
+    };
 
-    @Autowired
-    private CorsConfigurationSource corsConfigurationSource;
-
-    @Autowired
-    private CustomUserDetailsService customUserDetailsService;
+    private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final JwtAuthenticationEntryPoint jwtAuthenticationEntryPoint;
 
     @Bean
-    PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder(12);
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
     }
 
     @Bean
-    SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration configuration) throws Exception {
+        return configuration.getAuthenticationManager();
+    }
 
-        http.cors(cors -> cors.configurationSource(corsConfigurationSource)) // Enable CORS
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, CorsConfigurationSource corsConfigurationSource) throws Exception {
+        http
                 .csrf(AbstractHttpConfigurer::disable)
-                .authorizeHttpRequests((authorize) -> {
-                    authorize
-                            .requestMatchers("/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/register/verify", "/api/v1/auth/otp/resend",
-                                    "/api/v1/auth/check-username", "/actuator/**", "/api/v1/auth/validate")
-                            .permitAll();
-                    authorize.requestMatchers("/swagger-ui/**", "/v3/api-docs/**", "/swagger-ui.html").permitAll();
-                    authorize.requestMatchers("/api-v1/super-admin/**").hasRole("SUPER_ADMIN");
-                    authorize.requestMatchers("/api/v1/admin/**").hasAnyRole("ADMIN", "SUPER_ADMIN");
-                    authorize.requestMatchers("/api/v1/user/**").hasAnyRole("USER", "ADMIN", "SUPER_ADMIN");
-                    authorize.requestMatchers(HttpMethod.OPTIONS, "/**").authenticated();
-                    authorize.anyRequest().authenticated();
-                })
-                .httpBasic(Customizer.withDefaults())
+                .cors(cors -> cors.configurationSource(corsConfigurationSource))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .addFilterBefore(authenticationFilter, UsernamePasswordAuthenticationFilter.class);
+                .exceptionHandling(e -> e.authenticationEntryPoint(jwtAuthenticationEntryPoint))
+                .headers(headers -> headers.referrerPolicy(referrer ->
+                        referrer.policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN)))
+                .authorizeHttpRequests(auth -> auth
+                        // Preflight requests never carry credentials/body - always safe to allow,
+                        // and must never be blocked by anyRequest().authenticated() below.
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        .requestMatchers(PUBLIC_ENDPOINTS).permitAll()
+                        .anyRequest().authenticated()
+                )
+                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
-
-    @Bean
-    public AuthenticationProvider authenticationProvider() {
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
-        provider.setPasswordEncoder(passwordEncoder());
-        provider.setUserDetailsService(customUserDetailsService);
-        return provider;
-    }
-
-    @Bean
-    public AuthenticationManager authenticationManager(AuthenticationConfiguration authenticationConfiguration)
-            throws Exception {
-        return authenticationConfiguration.getAuthenticationManager();
-    }
-
 }

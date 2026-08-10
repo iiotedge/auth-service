@@ -21,18 +21,12 @@ spring:
     host: localhost  # The Redis service name in Docker Compose (could be 'localhost' in dev environments)
     port: 6379   # Default Redis port
     password: 8506  # Password for Redis if authentication is enabled
-    redis:
-      pool:
-        max-active: 10  # Maximum number of connections in the Redis connection pool
-        max-idle: 5     # Maximum number of idle connections
-        min-idle: 1     # Minimum number of idle connections
-        max-wait: 2000  # Maximum wait time (in ms) to get a connection from the pool
     timeout: 2000  # Connection timeout for Redis (in ms)
 
 rate:
   limit:
     max-requests: 10  # Max 10 requests per minute
-    time-window: 1     # 1 minute time window
+    time-window: 1     # 1 minute time window (RateLimitAspect reads this as minutes)
     error-message: "Too many requests. Please try again in a few seconds."
 
 springdoc:
@@ -53,6 +47,13 @@ server:
 
 jwt:
   secret: "Vlo2vcFdiXGgWqZLEpLw6kk99sH8/4odgC2XgZV0IbA="
+
+# Local-dev-only default so the seeded super admin still works out of the
+# box; production has no fallback (see application-prod.yml) - never reuse
+# this value outside a local environment.
+admin:
+  seed:
+    password: ${SUPER_ADMIN_PASSWORD:DevOnly@Passw0rd1}
 
 cors:
   allowed-origins: ${ALLOWED_CORS_ORIGINS:http://localhost:3000}

@@ -71,9 +71,13 @@ public class RateLimitAspect {
         // Retrieve IP address from headers or fallback to remote address
         String ipAddress = request.getHeader("X-Forwarded-For");
 
-        if (ipAddress == null || ipAddress.isEmpty() || "unknown".equalsIgnoreCase(ipAddress)) {
-            ipAddress = request.getHeader("Proxy-Client-IP");
+        if (ipAddress != null && !ipAddress.isEmpty() && !"unknown".equalsIgnoreCase(ipAddress)) {
+            // X-Forwarded-For can be a proxy chain ("client, proxy1, proxy2") - the
+            // original client is always the first hop.
+            return ipAddress.split(",")[0].trim();
         }
+
+        ipAddress = request.getHeader("Proxy-Client-IP");
         if (ipAddress == null || ipAddress.isEmpty() || "unknown".equalsIgnoreCase(ipAddress)) {
             ipAddress = request.getHeader("WL-Proxy-Client-IP");
         }

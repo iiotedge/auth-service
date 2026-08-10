@@ -1,8 +1,8 @@
 package com.iotmining.services.auth.dto;
 
 
-import com.iotmining.services.auth.enums.TenantAccessLevel;
-import com.iotmining.services.auth.enums.TenantType;
+import com.iotmining.common.data.tenant.TenantAccessLevel;
+import com.iotmining.common.data.tenant.TenantType;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;

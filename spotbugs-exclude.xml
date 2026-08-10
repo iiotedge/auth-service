@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    SpotBugs suppression filter for auth-service.
+
+    Two kinds of entries live here:
+    1. PERMANENT — rule noise that does not apply to a Spring/Lombok codebase.
+    2. BASELINE — real findings, each with a documented reason it's a false
+       positive or an accepted, deferred smell. Fix the code, then delete
+       the entry (ratchet down, never up).
+-->
+<FindBugsFilter>
+
+    <!-- ================= PERMANENT ================= -->
+
+    <!-- Constructor-injected Spring beans and Lombok data carriers intentionally
+         store/expose "external mutable objects". Standard suppression for DI apps. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- ================= BASELINE ================= -->
+
+    <!-- findUsersByTenantId logs its UUID-typed parameter - a structurally
+         impossible false positive (UUID.toString() can only ever produce
+         hex digits and hyphens, never CR/LF). The finding's taint trace
+         crosses both classes since AuthenticationController's
+         listTenantUsers is the caller. -->
+    <Match>
+        <Bug pattern="CRLF_INJECTION_LOGS"/>
+        <Or>
+            <Class name="com.iotmining.services.auth.services.UserService"/>
+            <Class name="com.iotmining.services.auth.controller.AuthenticationController"/>
+        </Or>
+    </Match>
+
+    <!-- UserDetails requires Serializable, but the wrapped JPA User entity
+         isn't. Only matters if a UserPrincipal is ever serialized (session
+         replication, distributed cache) - this service is stateless JWT
+         only (SecurityConfig: SessionCreationPolicy.STATELESS), so it
+         never is today. Revisit if that ever changes. -->
+    <Match>
+        <Class name="com.iotmining.services.auth.security.UserPrincipal"/>
+        <Bug pattern="SE_BAD_FIELD"/>
+    </Match>
+
+    <!-- JwtTokenProvider's @PostConstruct writes instance-injected config
+         (@Value fields) into static fields, because its token-generation
+         API is static (callers use JwtTokenProvider.generateAccessToken(...)
+         without an injected instance - see AuthenticationController).
+         Real design smell; fixing it means converting the whole class and
+         every call site to instance-based, which is a deliberate refactor
+         of its own, not a hardening-pass-sized change. -->
+    <Match>
+        <Class name="com.iotmining.services.auth.util.JwtTokenProvider"/>
+        <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
+    </Match>
+
+</FindBugsFilter>

@@ -31,3 +31,15 @@ build/
 
 ### VS Code ###
 # .vscode/
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Runtime logs (see application-dev.yml's logging.config) ###
+logs/
+
+### Local env / secrets ###
+.env
+.env.*
+!.env.example

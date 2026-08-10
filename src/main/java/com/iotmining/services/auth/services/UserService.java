@@ -2,51 +2,61 @@ package com.iotmining.services.auth.services;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.iotmining.common.base.notifications.dto.BaseRequest;
 import com.iotmining.common.base.notifications.dto.BaseResponse;
+import com.iotmining.common.base.notifications.dto.NotificationRequest;
 import com.iotmining.common.base.notifications.dto.NotificationResponse;
+import com.iotmining.common.base.notifications.enums.NotificationType;
 import com.iotmining.services.auth.clients.NotificationClient;
 import com.iotmining.services.auth.dto.*;
+import com.iotmining.services.auth.entity.Role;
 import com.iotmining.services.auth.entity.User;
 import com.iotmining.services.auth.exceptions.UserMessageException;
+import com.iotmining.services.auth.repository.RoleRepository;
 import com.iotmining.services.auth.repository.UserRepository;
 import com.iotmining.services.auth.security.UserPrincipal;
 import com.iotmining.services.auth.util.JwtTokenProvider;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.http.*;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.LockedException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
-@Log4j2
+@Slf4j
 public class UserService {
 
     private final AuthenticationManager authenticationManager;
     private final UserLoginDataService userLoginDataService;
     private final UserRepository userRepository;
+    private final RoleRepository roleRepository;
     private final PasswordEncoder passwordEncoder;
 
-    private final RestTemplate restTemplate;                 // TMS + fallback to notifications
-    private final NotificationClient notificationClient;     // Feign to notification-service
-    private final StringRedisTemplate redis;                 // Redis for pending-reg + indexes
+    // External Services & Clients
+    private final RestTemplate restTemplate;
+    private final NotificationClient notificationClient;
+    private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
-
     private final OtpStore otpStore;
 
     @Value("${tenant.service.url}")
@@ -55,280 +65,329 @@ public class UserService {
     @Value("${notification.service.url:http://localhost:8087}")
     private String notificationBaseUrl;
 
-    // Redis keys / TTL
+    @Value("${account.lockout.max-attempts:5}")
+    private int maxFailedLoginAttempts;
+
+    @Value("${account.lockout.duration-minutes:15}")
+    private long lockoutDurationMinutes;
+
+    @Value("${otp.max.attempts:5}")
+    private int maxOtpAttempts;
+
+    @Value("${otp.resend.max.per.hour:3}")
+    private int maxOtpResendsPerHour;
+
+    // Constants
     private static final String REG_KEY_FMT = "reg:prospect:%s";
-    private static final String IDX_KEY_FMT = "reg:index:%s:%s"; // type,email|phone -> prospectId
+    private static final String IDX_KEY_FMT = "reg:index:%s:%s"; // type:identifier -> prospectId
     private static final Duration OTP_TTL = Duration.ofMinutes(5);
 
-    // ================= LOGIN =================
+    // ==================================================================================
+    // 1. LOGIN FLOW
+    // ==================================================================================
     public Map<String, Object> verify(UserCredentialDTO request) {
         Map<String, Object> response = new HashMap<>();
+        log.info("Login attempt for user: {}", request.getUsername());
+
         try {
             Authentication authentication = authenticationManager.authenticate(
                     new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword()));
 
-            if (!authentication.isAuthenticated()) {
-                response.put("message", "Bad credentials");
-                response.put("statusCode", 401);
-                response.put("data", null);
-                return response;
+            UserPrincipal userPrincipal = (UserPrincipal) authentication.getPrincipal();
+
+            if (!userPrincipal.isEnabled()) {
+                throw new UserMessageException("Account is disabled. Please contact support.");
             }
 
-            UserPrincipal userPrincipal = (UserPrincipal) authentication.getPrincipal();
-            if (!userPrincipal.isEnabled()) {
-                throw new UserMessageException("Account is not active");
-            }
+            resetFailedLoginAttempts(userPrincipal.getUser());
 
             List<String> roles = userPrincipal.getAuthorities().stream()
                     .map(GrantedAuthority::getAuthority)
                     .collect(Collectors.toList());
 
+            // Generate Token
             UserLoginDataDTO userLoginData = JwtTokenProvider.generateToken(userPrincipal, roles);
-            User user = userPrincipal.getUser();
-            userLoginData.setUser(user);
-            userLoginData.setId(user.getUserId());
-            userLoginData.setIsUserLoggedIn(true);
+
+            // Log Event Async
+            userLoginData.setUser(userPrincipal.getUser());
+            userLoginDataService.addUserAsyncLoginData(userLoginData);
 
             AuthResponseDTO authResponseDTO = new AuthResponseDTO();
             authResponseDTO.setAccessToken(userLoginData.getConfirmationToken());
             authResponseDTO.setIsAccountActive(true);
-
-            userLoginDataService.addUserAsyncLoginData(userLoginData);
 
             response.put("message", "Login successful");
             response.put("statusCode", 200);
             response.put("data", authResponseDTO);
             return response;
 
-        } catch (UserMessageException e) {
-            response.put("message", e.getMessage());
-            response.put("statusCode", 401);
-            response.put("data", null);
+        } catch (LockedException e) {
+            log.warn("Login blocked: account locked for {}", request.getUsername());
+            response.put("message", "Account temporarily locked due to repeated failed login attempts. Try again later.");
+            response.put("statusCode", 423);
             return response;
         } catch (BadCredentialsException e) {
-            response.put("message", "Bad credentials");
+            log.warn("Login failed: Bad credentials for {}", request.getUsername());
+            recordFailedLoginAttempt(request.getUsername());
+            response.put("message", "Invalid username or password");
             response.put("statusCode", 401);
-            response.put("data", null);
             return response;
-        } catch (RuntimeException e) {
-            response.put("message", "Internal Server Error: " + e.getMessage());
+        } catch (Exception e) {
+            log.error("Login unexpected error", e);
+            response.put("message", "Internal Server Error");
             response.put("statusCode", 500);
-            response.put("data", null);
             return response;
         }
     }
 
-    // ============== REGISTRATION: INIT (OTP) ==============
+    /**
+     * Spring Security's DaoAuthenticationProvider hides "user not found" behind
+     * BadCredentialsException by default (avoids username enumeration), so a
+     * failed lookup here just means "not a real account" - nothing to record.
+     */
+    private void recordFailedLoginAttempt(String usernameOrEmail) {
+        userRepository.findByUsernameOrEmail(usernameOrEmail).ifPresent(user -> {
+            int attempts = user.getFailedLoginAttempts() + 1;
+            user.setFailedLoginAttempts(attempts);
+            if (attempts >= maxFailedLoginAttempts) {
+                user.setLockedUntil(Instant.now().plus(Duration.ofMinutes(lockoutDurationMinutes)));
+                log.warn("Account locked for {} minutes after {} failed login attempts: {}",
+                        lockoutDurationMinutes, attempts, usernameOrEmail);
+            }
+            userRepository.save(user);
+        });
+    }
+
+    private void resetFailedLoginAttempts(User user) {
+        if (user.getFailedLoginAttempts() != 0 || user.getLockedUntil() != null) {
+            user.setFailedLoginAttempts(0);
+            user.setLockedUntil(null);
+            userRepository.save(user);
+        }
+    }
+
+    // ==================================================================================
+    // 2. REGISTRATION: PHASE 1 (INIT) - Saves State to Redis
+    // ==================================================================================
     public Map<String, Object> registerInit(RegisterDTO request) {
         Map<String, Object> resp = new HashMap<>();
+        log.info("Registration Init for email: {}", request.getEmail());
+
         try {
             if (request.getRoles() != null && request.getRoles().contains("ROLE_SUPER_ADMIN")) {
-                throw new UserMessageException("You are not authorized to create a Super Admin account, Thanks.");
+                throw new UserMessageException("Authorization Error: Cannot create Super Admin account via public API.");
             }
 
             if (userRepository.existsByUsername(request.getUsername())) {
                 resp.put("statusCode", 409);
                 resp.put("message", "Username already exists.");
-                resp.put("data", null);
                 return resp;
             }
-
-            final String email = request.getEmail();
-            final String phone = request.getPhoneNumber() == null ? null : String.valueOf(request.getPhoneNumber());
-            final String resolvedChannel = resolveChannel(request.getOtpChannel(), phone, email);
 
             final UUID prospectId = UUID.randomUUID();
             final String pId = prospectId.toString().toLowerCase(Locale.ROOT);
             final String otp = otpStore.generateCode();
 
-            // Persist OTP (hashed) + pending registration + identifier indexes
+            // Resolve Channel
+            final String email = request.getEmail();
+            final String phone = request.getPhoneNumber();
+            final String resolvedChannel = resolveChannel(request.getOtpChannel(), phone, email);
+
+            // Save to Redis
             saveOtpAndPending(pId, otp, request);
 
-            boolean delivered = sendOtpAccordingToMode(prospectId, resolvedChannel, request, otp);
+            // Send Notification
+            boolean delivered = sendOtpInternalJwt(pId, resolvedChannel,
+                    "EMAIL".equals(resolvedChannel) ? email : phone, otp);
+
             if (!delivered) {
-                resp.put("statusCode", 500);
-                resp.put("message", "Failed to deliver OTP");
-                resp.put("data", null);
-                return resp;
+                redis.delete(REG_KEY_FMT.formatted(pId)); // Cleanup
+                throw new RuntimeException("Failed to deliver OTP via " + resolvedChannel);
             }
 
-            Map<String, Object> data = new HashMap<>();
-            data.put("prospectId", pId);
-            data.put("otpChannel", resolvedChannel);
-
             resp.put("statusCode", 202);
-            resp.put("message", "OTP sent");
-            resp.put("data", data);
+            resp.put("message", "OTP sent successfully");
+            resp.put("data", Map.of("prospectId", pId, "otpChannel", resolvedChannel));
             return resp;
 
         } catch (UserMessageException e) {
-            resp.put("statusCode", 400);
-            resp.put("message", "Register failed! " + e.getMessage());
-            resp.put("data", null);
-            return resp;
+            resp.put("statusCode", 400); resp.put("message", e.getMessage()); return resp;
         } catch (Exception e) {
-            log.warn("registerInit error: {}", e.getMessage(), e);
-            resp.put("statusCode", 500);
-            resp.put("message", "Internal Error during registration: " + e.getMessage());
-            resp.put("data", null);
-            return resp;
+            log.error("Register Init Error", e);
+            resp.put("statusCode", 500); resp.put("message", "Registration failed: " + e.getMessage()); return resp;
         }
     }
 
-    // ============== REGISTRATION: VERIFY OTP ==============
+    // ==================================================================================
+    // 3. REGISTRATION: PHASE 2 (VERIFY OTP & CREATE)
+    // ==================================================================================
+    // Using @Transactional so if User Save fails, Role assignments are rolled back in DB
+    @Transactional(noRollbackFor = {RuntimeException.class}) // Manual rollback handled for TMS
     public Map<String, Object> verifyOtp(OtpVerifyRequest req) {
         Map<String, Object> resp = new HashMap<>();
+
         try {
-            if (req.getIdentifier() == null || req.getIdentifier().isBlank()) {
-                resp.put("statusCode", 400);
-                resp.put("message", "identifier is required");
-                resp.put("data", null);
-                return resp;
-            }
-            if (req.getType() == null || req.getType().isBlank()) {
-                resp.put("statusCode", 400);
-                resp.put("message", "type is required (SMS|EMAIL)");
-                resp.put("data", null);
-                return resp;
+            // 1. Validation & Resolution
+            if (req.getIdentifier() == null || req.getType() == null) {
+                resp.put("statusCode", 400); resp.put("message", "Identifier and Type required"); return resp;
             }
 
-            final String type = req.getType().trim().toUpperCase(Locale.ROOT); // "SMS" or "EMAIL"
+            final String type = req.getType().trim().toUpperCase(Locale.ROOT);
             final String rawId = req.getIdentifier().trim();
             final String normalizedId = "EMAIL".equals(type) ? rawId.toLowerCase(Locale.ROOT) : rawId;
 
-            // 1) Resolve prospectId from the index (email/phone) OR treat identifier as a raw prospectId (UUID)
             String prospectId = redis.opsForValue().get(indexKey(type, normalizedId));
-            if (prospectId == null && looksLikeUuid(rawId)) {
-                prospectId = rawId.toLowerCase(Locale.ROOT);
-            }
+            if (prospectId == null && looksLikeUuid(rawId)) prospectId = rawId.toLowerCase(Locale.ROOT);
+
             if (prospectId == null) {
-                resp.put("statusCode", 404);
-                resp.put("message", "Pending user not found for identifier");
-                resp.put("data", null);
+                resp.put("statusCode", 404); resp.put("message", "Session expired or invalid."); return resp;
+            }
+
+            // 2. Verify OTP - capped at maxOtpAttempts wrong guesses (otpStore
+            // already tracked "attempts" but nothing previously enforced a
+            // limit on it, leaving OTP guessing effectively unbounded).
+            Map<String, Object> otpRecord = otpStore.get(prospectId);
+            int attemptsSoFar = otpRecord == null ? 0 : ((Number) otpRecord.getOrDefault("attempts", 0)).intValue();
+            if (attemptsSoFar >= maxOtpAttempts) {
+                resp.put("statusCode", 429);
+                resp.put("message", "Too many incorrect attempts. Please request a new OTP.");
                 return resp;
             }
 
-            // 2) Verify OTP using OtpStore (hashed)
-            boolean ok = otpStore.verify(prospectId, req.getOtp());
-            if (!ok) {
-                resp.put("statusCode", 400);
-                resp.put("message", "Invalid or expired OTP.");
-                resp.put("data", null);
-                return resp;
+            if (!otpStore.verify(prospectId, req.getOtp())) {
+                otpStore.incrementAttempts(prospectId);
+                resp.put("statusCode", 400); resp.put("message", "Invalid OTP"); return resp;
             }
 
-            // 3) Load pending registration
+            // 3. Load Data from Redis
             final String regKey = REG_KEY_FMT.formatted(prospectId);
             final String regJson = redis.opsForValue().get(regKey);
             if (regJson == null) {
-                resp.put("statusCode", 404);
-                resp.put("message", "Pending user not found.");
-                resp.put("data", null);
-                return resp;
+                resp.put("statusCode", 404); resp.put("message", "Session data missing."); return resp;
             }
-            final RegisterDTO register = objectMapper.readValue(regJson, RegisterDTO.class);
+            RegisterDTO register = objectMapper.readValue(regJson, RegisterDTO.class);
 
-            // === Create tenant via TMS ===
+            // ---------------------------------------------------------
+            // STEP A: CREATE TENANT (Call TMS)
+            // ---------------------------------------------------------
             CreateTenantRequest tenantRequest = new CreateTenantRequest();
-            tenantRequest.setTenantName(register.getFirstName() + " " + register.getLastName());
+            String tenantName = register.getOrganizationName() != null && !register.getOrganizationName().isBlank()
+                    ? register.getOrganizationName()
+                    : register.getFirstName() + " " + register.getLastName();
+
+            tenantRequest.setTenantName(tenantName);
             tenantRequest.setSubscriptionPlan("BASIC");
             tenantRequest.setRoles(register.getRoles());
             tenantRequest.setParentId(register.getParentTenantId());
 
-            ResponseEntity<CreateTenantResponse> tenantResponse =
-                    restTemplate.postForEntity(tenantServiceUrl, tenantRequest, CreateTenantResponse.class);
+            UUID tenantId;
+            try {
+                // IMPORTANT: This call is external. If it succeeds but local User save fails, we MUST rollback TMS manually.
+                HttpHeaders tmsHeaders = new HttpHeaders();
+                tmsHeaders.setBearerAuth(JwtTokenProvider.issueInternalToken(
+                        "auth-service", "tms-create-tenant", "tenant-management-service", 5));
+                HttpEntity<CreateTenantRequest> tmsRequestEntity = new HttpEntity<>(tenantRequest, tmsHeaders);
 
-            if (tenantResponse.getBody() == null || tenantResponse.getBody().getTenantId() == null) {
-                throw new RuntimeException("Failed to create tenant for user: " + register.getUsername());
+                ResponseEntity<CreateTenantResponse> tenantResponse =
+                        restTemplate.postForEntity(tenantServiceUrl, tmsRequestEntity, CreateTenantResponse.class);
+                CreateTenantResponse tenantResponseBody = tenantResponse.getBody();
+
+                if (!tenantResponse.getStatusCode().is2xxSuccessful() || tenantResponseBody == null) {
+                    throw new RuntimeException("TMS responded with " + tenantResponse.getStatusCode());
+                }
+                tenantId = tenantResponseBody.getTenantId();
+            } catch (Exception e) {
+                log.error("TMS Call Failed", e);
+                resp.put("statusCode", 503); resp.put("message", "Could not create organization. System busy."); return resp;
             }
-            UUID tenantId = tenantResponse.getBody().getTenantId();
 
-            // === Persist user ===
+            // ---------------------------------------------------------
+            // STEP B: CREATE USER
+            // ---------------------------------------------------------
             User user = new User();
             user.setFirstName(register.getFirstName());
             user.setLastName(register.getLastName());
+            user.setUsername(register.getUsername());
+            user.setEmail(register.getEmail());
+            user.setPhoneNumber(register.getPhoneNumber());
+            user.setPassword(passwordEncoder.encode(register.getPassword()));
+            user.setIsAccountActive(true);
+            user.setTenantId(tenantId);
             user.setGender(register.getGender());
             user.setDateOfBirth(register.getDateOfBirth());
-            user.setIsAccountActive(!(register.getRoles() != null && register.getRoles().contains("ROLE_ADMIN")));
-            user.setEmail(register.getEmail());
-            user.setPassword(passwordEncoder.encode(register.getPassword()));
-            user.setPhoneNumber(register.getPhoneNumber());
-            user.setUsername(register.getUsername());
-            user.setTenantId(tenantId);
 
-            userRepository.save(user);
+            // Handle Roles (Prevent Duplicates)
+            Set<Role> userRoles = new HashSet<>();
+            List<String> rolesToAssign = register.getRoles() != null && !register.getRoles().isEmpty()
+                    ? register.getRoles() : List.of("ROLE_USER");
 
-            // === Cleanup ===
+            for (String roleName : rolesToAssign) {
+                Role role = roleRepository.findByName(roleName)
+                        .orElseGet(() -> roleRepository.save(new Role(roleName)));
+                userRoles.add(role);
+            }
+            user.setRoles(userRoles);
+
+            try {
+                userRepository.save(user);
+                log.info("User created successfully: {}", user.getUserId());
+            } catch (Exception e) {
+                log.error("User Save Failed. Initiating Compensation Transaction (Rollback Tenant: {})", tenantId, e);
+                rollbackTenantCreation(tenantId); // Manual Compensation
+                resp.put("statusCode", 500); resp.put("message", "Registration failed. Changes rolled back."); return resp;
+            }
+
+            // Cleanup Redis
             otpStore.delete(prospectId);
             redis.delete(regKey);
-            removeIdentifierIndexes(prospectId, register); // removes both EMAIL and SMS index keys if they exist
+            removeIdentifierIndexes(prospectId, register);
 
             Map<String, Object> data = new HashMap<>();
             data.put("userId", user.getUserId());
             data.put("tenantId", user.getTenantId());
+            data.put("organizationName", tenantName);
 
             resp.put("statusCode", 201);
-            resp.put("message", "User created");
+            resp.put("message", "Registration successful!");
             resp.put("data", data);
             return resp;
 
-        } catch (DataIntegrityViolationException e) {
-            resp.put("statusCode", 409);
-            resp.put("message", "Username already exists.");
-            resp.put("data", null);
-            return resp;
         } catch (Exception e) {
-            log.warn("verifyOtp error: {}", e.getMessage(), e);
-            resp.put("statusCode", 500);
-            resp.put("message", "Internal Error during OTP verification: " + e.getMessage());
-            resp.put("data", null);
-            return resp;
+            log.error("Verify OTP Error", e);
+            resp.put("statusCode", 500); resp.put("message", "Internal Error: " + e.getMessage()); return resp;
         }
     }
 
-    // ============== REGISTRATION: RESEND OTP ==============
+    // ==================================================================================
+    // 4. RESEND OTP
+    // ==================================================================================
     public Map<String, Object> resendOtp(OtpResendRequest req) {
         Map<String, Object> resp = new HashMap<>();
         try {
-            if (req.getIdentifier() == null || req.getIdentifier().isBlank()) {
-                resp.put("statusCode", 400);
-                resp.put("message", "identifier is required");
-                resp.put("data", null);
-                return resp;
+            if (req.getIdentifier() == null) {
+                resp.put("statusCode", 400); resp.put("message", "Identifier required"); return resp;
             }
 
             final String rawId = req.getIdentifier().trim();
-            final String inferredType = inferTypeFromIdentifier(rawId); // EMAIL if contains '@' else SMS
-            final String idxKey = indexKey(inferredType, "EMAIL".equals(inferredType) ? rawId.toLowerCase(Locale.ROOT) : rawId);
+            final String inferredType = inferTypeFromIdentifier(rawId);
+            final String idxKey = indexKey(inferredType, "EMAIL".equals(inferredType) ? rawId.toLowerCase() : rawId);
 
-            // Resolve prospectId from index OR from raw UUID
             String prospectId = redis.opsForValue().get(idxKey);
-            if (prospectId == null && looksLikeUuid(rawId)) {
-                prospectId = rawId.toLowerCase(Locale.ROOT);
-            }
+            if (prospectId == null && looksLikeUuid(rawId)) prospectId = rawId.toLowerCase();
+
             if (prospectId == null) {
-                resp.put("statusCode", 404);
-                resp.put("message", "Pending user not found for identifier");
-                resp.put("data", null);
-                return resp;
+                resp.put("statusCode", 404); resp.put("message", "Pending registration not found."); return resp;
             }
 
-            // Load pending registration
             final String regKey = REG_KEY_FMT.formatted(prospectId);
             final String regJson = redis.opsForValue().get(regKey);
             if (regJson == null) {
-                resp.put("statusCode", 404);
-                resp.put("message", "Pending user not found.");
-                resp.put("data", null);
-                return resp;
+                resp.put("statusCode", 404); resp.put("message", "Session expired."); return resp;
             }
             final RegisterDTO register = objectMapper.readValue(regJson, RegisterDTO.class);
 
-            // Determine outbound channel/identifier
-            final String requestedType = (req.getOtpChannel() == null)
-                    ? inferredType
-                    : req.getOtpChannel().trim().toUpperCase(Locale.ROOT);
-
+            // Channel Logic
+            final String requestedType = (req.getOtpChannel() == null) ? inferredType : req.getOtpChannel().trim().toUpperCase();
             final String outChannel;
             final String outIdentifier;
 
@@ -337,547 +396,212 @@ public class UserService {
                 outIdentifier = normalizeIdentifier(inferredType, rawId, register);
             } else {
                 if (!req.isAllowSwitch()) {
-                    resp.put("statusCode", 400);
-                    resp.put("message", "Switching channel requires allowSwitch=true");
-                    resp.put("data", null);
-                    return resp;
+                    resp.put("statusCode", 400); resp.put("message", "Channel switch not allowed"); return resp;
                 }
                 if ("EMAIL".equals(requestedType)) {
-                    if (register.getEmail() == null || register.getEmail().isBlank()) {
-                        resp.put("statusCode", 400);
-                        resp.put("message", "Email not present on pending registration");
-                        resp.put("data", null);
-                        return resp;
-                    }
-                    outChannel = "EMAIL";
-                    outIdentifier = register.getEmail().trim().toLowerCase(Locale.ROOT);
-                } else if ("SMS".equals(requestedType)) {
-                    if (register.getPhoneNumber() == null) {
-                        resp.put("statusCode", 400);
-                        resp.put("message", "Phone number not present on pending registration");
-                        resp.put("data", null);
-                        return resp;
-                    }
-                    outChannel = "SMS";
-                    outIdentifier = String.valueOf(register.getPhoneNumber());
+                    outChannel = "EMAIL"; outIdentifier = register.getEmail();
                 } else {
-                    resp.put("statusCode", 400);
-                    resp.put("message", "type must be either SMS or EMAIL");
-                    resp.put("data", null);
-                    return resp;
+                    outChannel = "SMS"; outIdentifier = register.getPhoneNumber();
                 }
             }
 
-            // Optional: enforce resend budget per prospect (per-hour cap)
-            try {
-                otpStore.ensureResendBudget(prospectId, 5);
-            } catch (RuntimeException budgetEx) {
-                resp.put("statusCode", 429);
-                resp.put("message", "Too many OTP resends. Try again later.");
-                resp.put("data", null);
-                return resp;
-            }
+            // Rate Limit
+            try { otpStore.ensureResendBudget(prospectId, maxOtpResendsPerHour); }
+            catch (RuntimeException e) { resp.put("statusCode", 429); resp.put("message", "Too many attempts"); return resp; }
 
-            // Replace OTP (hashed) and refresh TTLs for reg + indexes
+            // New OTP
             final String newOtp = otpStore.generateCode();
-            Map<String, Object> extra = Map.of(
-                    "prospectId", prospectId,
-                    "channel", outChannel,
-                    "createdAt", System.currentTimeMillis()
-            );
+            Map<String, Object> extra = Map.of("prospectId", prospectId, "channel", outChannel, "createdAt", System.currentTimeMillis());
+
             otpStore.replaceOtp(prospectId, newOtp, extra, OTP_TTL);
-            redis.opsForValue().set(regKey, regJson, OTP_TTL);
-            refreshIdentifierIndexes(prospectId, register);
+            redis.opsForValue().set(regKey, regJson, OTP_TTL); // Refresh TTL
 
-            boolean delivered = sendOtpInternalJwt(prospectId, outChannel, outIdentifier, newOtp);
-            if (!delivered) {
-                resp.put("statusCode", 500);
-                resp.put("message", "Failed to deliver OTP");
-                resp.put("data", null);
-                return resp;
-            }
-
-            Map<String, Object> data = new HashMap<>();
-            data.put("prospectId", prospectId);
-            data.put("otpChannel", outChannel);
+            sendOtpInternalJwt(prospectId, outChannel, outIdentifier, newOtp);
 
             resp.put("statusCode", 202);
             resp.put("message", "OTP resent");
-            resp.put("data", data);
+            resp.put("data", Map.of("prospectId", prospectId));
             return resp;
 
         } catch (Exception e) {
-            log.warn("resendOtp error: {}", e.getMessage(), e);
-            resp.put("statusCode", 500);
-            resp.put("message", "Internal Error during resend: " + e.getMessage());
-            resp.put("data", null);
-            return resp;
+            log.error("Resend Error", e);
+            resp.put("statusCode", 500); resp.put("message", e.getMessage()); return resp;
         }
     }
 
-    // ================= helpers =================
-
-    private void saveOtpAndPending(String prospectId, String otp, RegisterDTO request) {
+    // ==================================================================================
+    // 5. INTERNAL USER CREATION (Admin creates Employee)
+    // ==================================================================================
+    @Transactional // Ensures user + roles are saved atomically
+    public Map<String, Object> createUserInternal(UserCreateDTO request, UUID adminTenantId) {
+        Map<String, Object> response = new HashMap<>();
         try {
-            // 1) Store hashed OTP via OtpStore
-            Map<String, Object> extra = new HashMap<>();
-            extra.put("prospectId", prospectId);
-            extra.put("channel", resolveChannel(request.getOtpChannel(),
-                    request.getPhoneNumber() == null ? null : String.valueOf(request.getPhoneNumber()),
-                    request.getEmail()));
-            extra.put("createdAt", System.currentTimeMillis());
-            otpStore.saveNew(prospectId, otp, extra, OTP_TTL);
+            if (userRepository.existsByUsername(request.getUsername())) throw new UserMessageException("Username taken");
+            if (userRepository.existsByEmail(request.getEmail())) throw new UserMessageException("Email taken");
 
-            // 2) Store pending registration JSON
-            redis.opsForValue().set(REG_KEY_FMT.formatted(prospectId), toJson(request), OTP_TTL);
+            User user = new User();
+            user.setFirstName(request.getFirstName());
+            user.setLastName(request.getLastName());
+            user.setUsername(request.getUsername());
+            user.setEmail(request.getEmail());
+            user.setPassword(passwordEncoder.encode(request.getPassword()));
+            user.setIsAccountActive(true);
+            user.setTenantId(adminTenantId); // Force into Admin's Tenant
 
-            // 3) Create identifier indexes (both if present)
-            indexProspectIdentifiers(prospectId, request);
+            Set<Role> userRoles = new HashSet<>();
+            List<String> rolesToAssign = request.getRoles() != null ? request.getRoles() : List.of("ROLE_USER");
+
+            for (String roleName : rolesToAssign) {
+                Role role = roleRepository.findByName(roleName).orElseGet(() -> roleRepository.save(new Role(roleName)));
+                userRoles.add(role);
+            }
+            user.setRoles(userRoles);
+
+            userRepository.save(user);
+
+            response.put("statusCode", 201);
+            response.put("message", "User added to organization");
+            response.put("userId", user.getUserId());
+            return response;
 
         } catch (Exception e) {
-            throw new RuntimeException("Failed to persist OTP state in Redis", e);
+            response.put("statusCode", 500);
+            response.put("message", e.getMessage());
+            return response;
         }
     }
 
-    private void indexProspectIdentifiers(String prospectId, RegisterDTO request) {
-        if (request.getEmail() != null && !request.getEmail().isBlank()) {
-            String email = request.getEmail().trim().toLowerCase(Locale.ROOT);
-            redis.opsForValue().set(indexKey("EMAIL", email), prospectId, OTP_TTL);
-        }
-        if (request.getPhoneNumber() != null) {
-            String phone = String.valueOf(request.getPhoneNumber());
-            redis.opsForValue().set(indexKey("SMS", phone), prospectId, OTP_TTL);
-        }
-    }
+    // ==================================================================================
+    // 6. FETCH USERS BY TENANT ID
+    // ==================================================================================
+    @Transactional(readOnly = true)
+    public List<UserSummaryDTO> findUsersByTenantId(UUID tenantId) {
+        log.info("==== Fetching users for Tenant ID: {} ====", tenantId);
 
-    private void refreshIdentifierIndexes(String prospectId, RegisterDTO request) {
-        if (request.getEmail() != null && !request.getEmail().isBlank()) {
-            String email = request.getEmail().trim().toLowerCase(Locale.ROOT);
-            redis.opsForValue().set(indexKey("EMAIL", email), prospectId, OTP_TTL);
-        }
-        if (request.getPhoneNumber() != null) {
-            String phone = String.valueOf(request.getPhoneNumber());
-            redis.opsForValue().set(indexKey("SMS", phone), prospectId, OTP_TTL);
-        }
-    }
+        List<User> users = userRepository.findByTenantId(tenantId);
 
-    private void removeIdentifierIndexes(String prospectId, RegisterDTO request) {
-        if (request.getEmail() != null && !request.getEmail().isBlank()) {
-            String email = request.getEmail().trim().toLowerCase(Locale.ROOT);
-            redis.delete(indexKey("EMAIL", email));
-        }
-        if (request.getPhoneNumber() != null) {
-            String phone = String.valueOf(request.getPhoneNumber());
-            redis.delete(indexKey("SMS", phone));
-        }
-    }
+        // THIS IS THE CRITICAL LOG:
+        log.info("==== Found {} users in the database ====", users.size());
 
-    private String indexKey(String type, String identifier) {
-        String id = "EMAIL".equalsIgnoreCase(type)
-                ? identifier.trim().toLowerCase(Locale.ROOT)
-                : identifier.trim();
-        return IDX_KEY_FMT.formatted(type.toUpperCase(Locale.ROOT), id);
-    }
+        return users.stream().map(user -> {
+            UserSummaryDTO dto = new UserSummaryDTO();
+            dto.setUserId(user.getUserId());
+            dto.setUsername(user.getUsername());
+            dto.setEmail(user.getEmail());
 
-    private String inferTypeFromIdentifier(String identifier) {
-        return identifier.contains("@") ? "EMAIL" : "SMS";
-    }
-
-    private String normalizeIdentifier(String type, String provided, RegisterDTO reg) {
-        if ("EMAIL".equalsIgnoreCase(type)) {
-            return reg.getEmail() != null ? reg.getEmail().trim().toLowerCase(Locale.ROOT) : provided.trim().toLowerCase(Locale.ROOT);
-        } else {
-            return reg.getPhoneNumber() != null ? String.valueOf(reg.getPhoneNumber()) : provided.trim();
-        }
-    }
-
-    private String resolveChannel(String requested, String phone, String email) {
-        String req = requested == null ? "AUTO" : requested.trim().toUpperCase(Locale.ROOT);
-
-        if ("EMAIL".equals(req)) return "EMAIL";
-        if ("SMS".equals(req)) return "SMS";
-        if ("BOTH".equals(req)) return "BOTH";
-
-        // AUTO: if both present -> BOTH
-        if (email != null && !email.isBlank() && phone != null && !phone.isBlank()) return "BOTH";
-        if (email != null && !email.isBlank()) return "EMAIL";
-        if (phone != null && !phone.isBlank()) return "SMS";
-        return "EMAIL"; // fallback
-    }
-
-    private boolean sendOtpAccordingToMode(UUID prospectId, String channel, RegisterDTO request, String otp) {
-        String email = request.getEmail();
-        String phone = request.getPhoneNumber() == null ? null : String.valueOf(request.getPhoneNumber());
-
-        boolean ok = false;
-        if ("BOTH".equals(channel)) {
-            if (email != null && !email.isBlank()) {
-                ok |= sendOtpInternalJwt(prospectId.toString(), "EMAIL", email, otp);
+            // Null-safe role extraction to prevent 500 errors
+            String roleName = "USER";
+            if (user.getRoles() != null && !user.getRoles().isEmpty()) {
+                roleName = user.getRoles().iterator().next().getName();
             }
-            if (phone != null && !phone.isBlank()) {
-                ok |= sendOtpInternalJwt(prospectId.toString(), "SMS", phone, otp);
-            }
-        } else if ("EMAIL".equals(channel)) {
-            if (email != null && !email.isBlank()) {
-                ok = sendOtpInternalJwt(prospectId.toString(), "EMAIL", email, otp);
-            }
-        } else {
-            if (phone != null && !phone.isBlank()) {
-                ok = sendOtpInternalJwt(prospectId.toString(), "SMS", phone, otp);
-            }
-        }
-        return ok;
+            dto.setAccessLevel(roleName);
+
+            return dto;
+        }).collect(Collectors.toList());
     }
 
-    /**
-     * Try Feign first; if for any reason the Authorization header doesn't make it through,
-     * fallback to RestTemplate with explicit headers.
-     */
+    // ==================================================================================
+    // HELPERS
+    // ==================================================================================
+
+    private void rollbackTenantCreation(UUID tenantId) {
+        try {
+            String rollbackUrl = tenantServiceUrl.endsWith("/") ? tenantServiceUrl + "internal/" + tenantId : tenantServiceUrl + "/internal/" + tenantId;
+
+            HttpHeaders tmsHeaders = new HttpHeaders();
+            tmsHeaders.setBearerAuth(JwtTokenProvider.issueInternalToken(
+                    "auth-service", "tms-rollback-tenant", "tenant-management-service", 5));
+            HttpEntity<Void> rollbackEntity = new HttpEntity<>(tmsHeaders);
+
+            restTemplate.exchange(rollbackUrl, HttpMethod.DELETE, rollbackEntity, Void.class);
+            log.info("Rollback successful for tenant: {}", tenantId);
+        } catch (Exception ex) {
+            log.error("FATAL: Rollback failed for tenant {}", tenantId, ex);
+        }
+    }
+
     private boolean sendOtpInternalJwt(String prospectId, String channel, String identifier, String otp) {
         try {
             String token = JwtTokenProvider.issueInternalToken("auth-service", prospectId, 10);
             String bearer = "Bearer " + token;
 
-            Map<String, Object> body = new HashMap<>();
-            body.put("type", channel);                // "EMAIL" | "SMS"
-            body.put("sourceApp", "auth-service");
-            body.put("priority", "HIGH");
-            body.put("retryCount", 0);
-            body.put("timestamp", System.currentTimeMillis());
-
-            Map<String, Object> payload = new HashMap<>();
+            Map<String, Object> payloadData = new HashMap<>();
             if ("SMS".equalsIgnoreCase(channel)) {
-                payload.put("phoneNumber", identifier);
-                payload.put("content", "Your OTP is " + otp + ". It expires in 5 minutes.");
+                payloadData.put("phoneNumber", identifier);
+                payloadData.put("content", "Your OTP is " + otp);
             } else {
-                payload.put("to", identifier);
-                payload.put("subject", "Your OTP Code");
-                payload.put("message", "Your OTP is " + otp + ". It expires in 5 minutes.");
+                payloadData.put("to", identifier);
+                payloadData.put("subject", "Verify your Account");
+                payloadData.put("body", "<h1>" + otp + "</h1>");
+                payloadData.put("isHtml", true);
             }
-            body.put("payload", payload);
 
-            // --- Attempt via FEIGN ---
+            NotificationRequest request = NotificationRequest.builder()
+                    .type(NotificationType.valueOf(channel.toUpperCase()))
+                    .sourceApp("auth-service")
+                    .priority(BaseRequest.Priority.HIGH)
+                    .payload(payloadData)
+                    .timestamp(System.currentTimeMillis())
+                    .build();
+
+            // Try Feign
             try {
-                ResponseEntity<BaseResponse<NotificationResponse>> res =
-                        notificationClient.sendInternalPreReg(bearer, prospectId, body);
-
-                if (res.getBody() != null && res.getBody().isSuccess() && res.getBody().isDelivered()) {
-                    return true;
-                }
-                log.warn("Feign call to notification-service returned non-success or not delivered: {}", res.getStatusCode());
-            } catch (Exception feignEx) {
-                log.warn("Feign internal-send failed (will fallback to RestTemplate): {}", feignEx.getMessage());
+                Map<String, Object> requestMap = objectMapper.convertValue(request, new TypeReference<>() {});
+                ResponseEntity<BaseResponse<NotificationResponse>> res = notificationClient.sendInternalPreReg(bearer, prospectId, requestMap);
+                BaseResponse<NotificationResponse> resBody = res.getBody();
+                if (resBody != null && resBody.isSuccess()) return true;
+            } catch (Exception e) {
+                log.warn("Feign failed, switching to fallback: {}", e.getMessage());
             }
 
-            // --- Fallback via RESTTEMPLATE (headers set explicitly) ---
+            // Fallback RestTemplate
             String url = notificationBaseUrl + "/api/notifications/internal/send";
             HttpHeaders headers = new HttpHeaders();
             headers.setBearerAuth(token);
             headers.add("X-Prospect-ID", prospectId);
             headers.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<NotificationRequest> entity = new HttpEntity<>(request, headers);
 
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-            ResponseEntity<String> rtRes = restTemplate.postForEntity(url, entity, String.class);
+            return restTemplate.postForEntity(url, entity, String.class).getStatusCode().is2xxSuccessful();
 
-            if (!rtRes.getStatusCode().is2xxSuccessful()) {
-                log.warn("RestTemplate internal-send non-2xx: {}", rtRes.getStatusCode());
-                return false;
-            }
-
-            BaseResponse<NotificationResponse> parsed =
-                    objectMapper.readValue(rtRes.getBody(), new TypeReference<BaseResponse<NotificationResponse>>() {});
-            return parsed != null && parsed.isSuccess() && parsed.isDelivered();
-
-        } catch (HttpStatusCodeException sce) {
-            log.warn("sendOtpInternalJwt HTTP error: {} body={}", sce.getStatusCode(), sce.getResponseBodyAsString());
-            return false;
         } catch (Exception e) {
-            log.warn("sendOtpInternalJwt failed: {}", e.getMessage(), e);
+            log.error("Send OTP Error", e);
             return false;
         }
     }
+
+    // Redis Helpers
+    private void saveOtpAndPending(String prospectId, String otp, RegisterDTO request) throws Exception {
+        Map<String, Object> extra = Map.of("prospectId", prospectId);
+        otpStore.saveNew(prospectId, otp, extra, OTP_TTL);
+        redis.opsForValue().set(REG_KEY_FMT.formatted(prospectId), objectMapper.writeValueAsString(request), OTP_TTL);
+        if (request.getEmail() != null) redis.opsForValue().set(indexKey("EMAIL", request.getEmail()), prospectId, OTP_TTL);
+        if (request.getPhoneNumber() != null) redis.opsForValue().set(indexKey("SMS", request.getPhoneNumber()), prospectId, OTP_TTL);
+    }
+
+    private void removeIdentifierIndexes(String prospectId, RegisterDTO request) {
+        if (request.getEmail() != null) redis.delete(indexKey("EMAIL", request.getEmail()));
+        if (request.getPhoneNumber() != null) redis.delete(indexKey("SMS", request.getPhoneNumber()));
+    }
+
+    private String indexKey(String type, String id) {
+        return IDX_KEY_FMT.formatted(type.toUpperCase(Locale.ROOT), id.trim().toLowerCase(Locale.ROOT));
+    }
+
+    private String normalizeIdentifier(String type, String provided, RegisterDTO reg) {
+        if ("EMAIL".equalsIgnoreCase(type)) return reg.getEmail().trim().toLowerCase();
+        return String.valueOf(reg.getPhoneNumber());
+    }
+
+    private String resolveChannel(String requested, String phone, String email) {
+        if ("SMS".equalsIgnoreCase(requested) && phone != null && !phone.isBlank()) return "SMS";
+        return "EMAIL";
+    }
+
+    private String inferTypeFromIdentifier(String id) { return id.contains("@") ? "EMAIL" : "SMS"; }
 
     private boolean looksLikeUuid(String s) {
-        try {
-            UUID.fromString(s);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private String toJson(Object o) {
-        try {
-            return objectMapper.writeValueAsString(o);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private String generateOtp(int length) {
-        // kept for compatibility if you ever need it elsewhere (OtpStore.generateCode is used above)
-        String digits = "0123456789";
-        Random r = new Random();
-        StringBuilder sb = new StringBuilder(length);
-        for (int i = 0; i < length; i++) sb.append(digits.charAt(r.nextInt(digits.length())));
-        return sb.toString();
+        try { UUID.fromString(s); return true; } catch (Exception e) { return false; }
     }
 }
 
-
-
-
-
-//package com.iotmining.services.auth.services;
-//
-//import java.util.*;
-//import java.util.stream.Collectors;
-//
-//import com.iotmining.services.auth.dto.*;
-//import com.iotmining.services.auth.entity.Role;
-//import com.iotmining.services.auth.entity.User;
-//import com.iotmining.services.auth.exceptions.UserMessageException;
-//import com.iotmining.services.auth.repository.UserRepository;
-//import com.iotmining.services.auth.security.UserPrincipal;
-//import com.iotmining.services.auth.util.JwtTokenProvider;
-//import lombok.RequiredArgsConstructor;
-//import org.springframework.beans.factory.annotation.Value;
-//import org.springframework.dao.DataIntegrityViolationException;
-//import org.springframework.http.ResponseEntity;
-//import org.springframework.security.authentication.AuthenticationManager;
-//import org.springframework.security.authentication.BadCredentialsException;
-//import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-//import org.springframework.security.core.Authentication;
-//import org.springframework.security.core.GrantedAuthority;
-//import org.springframework.security.crypto.password.PasswordEncoder;
-//import org.springframework.stereotype.Service;
-//import org.springframework.web.client.RestTemplate;
-//
-//@Service
-//
-//public class UserService {
-//
-//    private final AuthenticationManager authenticationManager;
-//    private final UserLoginDataService userLoginDataService;
-//    private final UserRepository userRepository;
-//    private final PasswordEncoder passwordEncoder;
-//    private final RestTemplate restTemplate;
-//
-//    @Value("${tenant.service.url}")
-//    private String tenantServiceUrl;
-//
-//    private final Map<String, Object> response = new HashMap<>();
-//
-//    public UserService(AuthenticationManager authenticationManager, UserLoginDataService userLoginDataService, UserRepository userRepository, PasswordEncoder passwordEncoder, RestTemplate restTemplate) {
-//        this.authenticationManager = authenticationManager;
-//        this.userLoginDataService = userLoginDataService;
-//        this.userRepository = userRepository;
-//        this.passwordEncoder = passwordEncoder;
-//        this.restTemplate = restTemplate;
-//    }
-//
-//    public Map<String, Object> verify(UserCredentialDTO request) {
-//        try {
-//            Authentication authentication = authenticationManager.authenticate(
-//                    new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword()));
-//
-//            if (authentication.isAuthenticated()) {
-//                AuthResponseDTO authResponseDTO = new AuthResponseDTO();
-//
-//                UserPrincipal userPrincipal = (UserPrincipal) authentication.getPrincipal();
-//
-//                if (!userPrincipal.isEnabled()) {
-//                    authResponseDTO.setAccessToken(null);
-//                    authResponseDTO.setIsAccountActive(false);
-//                    throw new UserMessageException("Account is not active");
-//                }
-//
-//                List<String> roles = userPrincipal.getAuthorities().stream()
-//                        .map(GrantedAuthority::getAuthority)
-//                        .collect(Collectors.toList());
-//
-//                UserLoginDataDTO userLoginData = JwtTokenProvider.generateToken(userPrincipal, roles);
-//                User user = userPrincipal.getUser();
-//                userLoginData.setUser(user);
-//                userLoginData.setId(user.getUserId());
-//                userLoginData.setIsUserLoggedIn(true);
-//
-//                authResponseDTO.setAccessToken(userLoginData.getConfirmationToken());
-//                authResponseDTO.setIsAccountActive(true);
-//
-//                userLoginDataService.addUserAsyncLoginData(userLoginData);
-//
-//                response.put("message", "Login successful");
-//                response.put("statusCode", 200);
-//                response.put("data", authResponseDTO);
-//
-//                return response;
-//            }
-//            response.put("message", "Bad credentials");
-//            response.put("statusCode", 401);
-//            response.put("data", null);
-//            return response;
-//
-//        } catch (UserMessageException e) {
-//            response.put("message", e.getMessage());
-//            response.put("statusCode", 401);
-//            response.put("data", null);
-//            return response;
-//        } catch (BadCredentialsException e) {
-//            response.put("message", "Bad credentials");
-//            response.put("statusCode", 401);
-//            response.put("data", null);
-//            return response;
-//        } catch (RuntimeException e) {
-//            response.put("message", "Internal Server Error: " + e.getMessage());
-//            response.put("statusCode", 500);
-//            response.put("data", null);
-//            return response;
-//        }
-//    }
-//
-////    public Map<String, Object> registerUser(RegisterDTO request) {
-////
-////        try {
-////            if (request.getRoles().contains("ROLE_SUPER_ADMIN")) {
-////                throw new UserMessageException("You are not authorized to create a Super Admin account, Thanks.");
-////            }
-////
-////            User user = new User();
-////            user.setFirstName(request.getFirstName());
-////            user.setLastName(request.getLastName());
-////            user.setGender(request.getGender());
-////            user.setDateOfBirth(request.getDateOfBirth());
-////            user.setIsAccountActive(!request.getRoles().contains("ROLE_ADMIN"));
-////            user.setEmail(request.getEmail());
-////            user.setPassword(passwordEncoder.encode(request.getPassword()));
-////            user.setPhoneNumber(request.getPhoneNumber());
-////            user.setUsername(request.getUsername());
-//////            // ✅ Fetch existing Roles or create if not exists
-//////            Set<Role> userRoles = request.getRoles()
-//////                    .stream()
-//////                    .map(roleName -> roleRepository.findByRoleName(roleName)
-//////                            .orElseGet(() -> roleRepository.save(new Role(roleName))))
-//////                    .collect(Collectors.toSet());
-////
-//////            user.setRoles(request.getRoles().stream().map(Role::new).collect(Collectors.toSet()));
-////
-////            // Step 1: Save User first
-//////            User savedUser = userRepository.save(user);
-////
-////            // Step 2: Call Tenant Management Service to create tenant
-////            CreateTenantRequest tenantRequest = new CreateTenantRequest(
-////                    user.getUsername(),
-////                    "BASIC" // default subscription plan
-////            );
-////
-////            ResponseEntity<CreateTenantResponse> tenantResponse = restTemplate.postForEntity(
-////                    tenantServiceUrl,
-////                    tenantRequest,
-////                    CreateTenantResponse.class
-////            );
-////
-////            if (tenantResponse.getStatusCode().is2xxSuccessful() && tenantResponse.getBody() != null) {
-////                UUID tenantId = tenantResponse.getBody().getTenantId();
-////                user.setTenantId(tenantId);
-////                userRepository.save(user); // Update with tenant ID
-////            } else {
-////                throw new RuntimeException("Failed to create tenant for user: " + user.getUsername());
-////            }
-////
-////            response.put("message", "Register successful!");
-////            response.put("statusCode", 201);
-////            response.put("data", user);
-////            return response;
-////
-////        } catch (DataIntegrityViolationException e) {
-////            response.put("message", "Username already exists.");
-////            response.put("statusCode", 409);
-////            response.put("data", null);
-////            return response;
-////        } catch (UserMessageException e) {
-////            response.put("message", "Register failed!, " + e.getMessage());
-////            response.put("statusCode", 400);
-////            response.put("data", null);
-////            return response;
-////        } catch (Exception e) {
-////            response.put("message", "Internal Error during registration: " + e.getMessage());
-////            response.put("statusCode", 500);
-////            response.put("data", null);
-////            return response;
-////        }
-////    }
-//    public Map<String, Object> registerUser(RegisterDTO request) {
-//        Map<String, Object> response = new HashMap<>();
-//        try {
-//            if (request.getRoles().contains("ROLE_SUPER_ADMIN")) {
-//                throw new UserMessageException("You are not authorized to create a Super Admin account, Thanks.");
-//            }
-//
-//            // ---- CHECK FOR DUPLICATE FIRST! ----
-//            if (userRepository.existsByUsername(request.getUsername())) {
-//                response.put("message", "Username already exists.");
-//                response.put("statusCode", 409);
-//                response.put("data", null);
-//                return response;
-//            }
-////            if (userRepository.existsByEmail(request.getEmail())) {
-////                response.put("message", "Email already exists.");
-////                response.put("statusCode", 409);
-////                response.put("data", null);
-////                return response;
-////            }
-//
-//            // Step 1: Save User basic info (but don't persist yet)
-//            User user = new User();
-//            user.setFirstName(request.getFirstName());
-//            user.setLastName(request.getLastName());
-//            user.setGender(request.getGender());
-//            user.setDateOfBirth(request.getDateOfBirth());
-//            user.setIsAccountActive(!request.getRoles().contains("ROLE_ADMIN"));
-//            user.setEmail(request.getEmail());
-//            user.setPassword(passwordEncoder.encode(request.getPassword()));
-//            user.setPhoneNumber(request.getPhoneNumber());
-//            user.setUsername(request.getUsername());
-//
-//            UUID parentId = request.getParentTenantId();
-//
-//            // Step 2: Now call TMS, since we know the user is unique!
-//            CreateTenantRequest tenantRequest = new CreateTenantRequest();
-//            tenantRequest.setTenantName(user.getFirstName() + " " + user.getLastName());
-//            tenantRequest.setSubscriptionPlan("BASIC");
-//            tenantRequest.setRoles(request.getRoles());
-//            tenantRequest.setParentId(parentId);
-//
-//            ResponseEntity<CreateTenantResponse> tenantResponse = restTemplate.postForEntity(
-//                    tenantServiceUrl,
-//                    tenantRequest,
-//                    CreateTenantResponse.class
-//            );
-//
-//            if (tenantResponse.getStatusCode().is2xxSuccessful() && tenantResponse.getBody() != null) {
-//                UUID tenantId = tenantResponse.getBody().getTenantId();
-//                user.setTenantId(tenantId);
-//                userRepository.save(user);
-//            } else {
-//                throw new RuntimeException("Failed to create tenant for user: " + user.getUsername());
-//            }
-//
-//            response.put("message", "Register successful!");
-//            response.put("statusCode", 201);
-//            response.put("data", user);
-//            return response;
-//
-//        } catch (UserMessageException e) {
-//            response.put("message", "Register failed! " + e.getMessage());
-//            response.put("statusCode", 400);
-//            response.put("data", null);
-//            return response;
-//        } catch (Exception e) {
-//            response.put("message", "Internal Error during registration: " + e.getMessage());
-//            response.put("statusCode", 500);
-//            response.put("data", null);
-//            return response;
-//        }
-//    }
-//}
