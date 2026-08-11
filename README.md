@@ -5,6 +5,9 @@ self-registration with OTP verification, refresh-token rotation, RBAC,
 brute-force protection, and a super-admin panel. Every other service on
 the platform trusts the JWTs this service issues.
 
+See [`CHECKLIST.md`](CHECKLIST.md) for what's production-verified vs. still
+open, and [`TODO.md`](TODO.md) for the reasoning behind each open item.
+
 ## Features
 
 - **Login** — username/email + password against BCrypt-hashed
@@ -42,7 +45,13 @@ the platform trusts the JWTs this service issues.
   user tree (calls tenant-management-service, then joins in local user
   details).
 - **Token cleanup** — a scheduled sweep removes expired login-history
-  rows and expired refresh tokens.
+  rows and expired refresh tokens, in bounded batches (`app.cleanup.batch-size`,
+  default 500, capped at 20 batches per run so a large backlog can't turn
+  one run into one long-running transaction), and safe under multiple
+  replicas via [ShedLock](https://github.com/lukas-krecan/ShedLock) — without
+  it, every instance would run the same sweep redundantly the moment this
+  service scales beyond one. See `TODO.md` for why this isn't (yet) a
+  Redis-native-TTL design instead.
 
 ## Architecture
 
@@ -119,8 +128,14 @@ in the response body with the same value mirrored as the HTTP status.
 | `cors.allowed-origins` | profile-specific | CSV of allowed origins |
 | `tenant.service.url` / `notification.service.url` | - | Downstream service URLs |
 | `spring.redis.host/port/password/ssl/timeout` | - | Redis connection (custom `RedisConfig`, not Boot's `spring.data.redis.*` auto-config) |
+| `app.cleanup.token-interval` | 300000 (5 min, ms) | How often the token-cleanup sweep runs |
+| `app.cleanup.batch-size` | 500 | Rows deleted per batch in the sweep (capped at 20 batches/run) |
+| `eureka.client.service-url.defaultZone` | profile-specific | Dev's fallback includes local basic-auth creds for convenience; prod has none - see `application-{dev,prod}.yml` |
 
 ## Known limitations
+
+See [`TODO.md`](TODO.md) for the full list with reasoning. The two worth
+knowing about before relying on this service in a new way:
 
 - **Refresh-token reuse detection is single-token-per-user, not
   family/generation tracking.** Rotation deletes-and-replaces the one
@@ -128,13 +143,9 @@ in the response body with the same value mirrored as the HTTP status.
   user's next refresh fail with "not found" rather than raising an
   explicit "reuse detected, revoke everything" alarm. IP pinning is the
   actual first line of defense here.
-- **No password-reset / forgot-password flow.** Self-registration and
-  admin-created users exist; there is no endpoint to reset a forgotten
-  password. A real feature to design, not a bug to fix.
-- **No MFA on login** - OTP exists only for registration verification.
-- **No CI pipeline wired up in this repo** (no Jenkinsfile/GitHub
-  Actions workflow present) despite the quality gates below being
-  fully configured - they currently only run when invoked locally.
+- **No password-reset flow and no MFA on login** - self-registration and
+  admin-created users exist; OTP exists only for registration
+  verification, not as a second login factor.
 
 ## Quality Gates & Production Readiness
 
@@ -143,7 +154,7 @@ Every `mvn verify` runs the full quality pipeline. A failure in any gate fails t
 | Gate | Tool | Threshold |
 |---|---|---|
 | Build environment | Maven Enforcer | Java ≥ 21, Maven ≥ 3.6.3, no duplicate dependencies |
-| Unit tests | JUnit 5 / Mockito / AssertJ | 152 tests, zero failures |
+| Unit tests | JUnit 5 / Mockito / AssertJ | 157 tests, zero failures |
 | Coverage | JaCoCo | ≥ 85% instructions, ≥ 65% branches (logic classes) |
 | Static & security analysis | SpotBugs + FindSecBugs | Zero unsuppressed findings (Medium+, effort Max) |
 

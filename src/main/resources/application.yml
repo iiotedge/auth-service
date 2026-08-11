@@ -5,6 +5,14 @@ spring:
     name: IoTMining-Auth-Service
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:dev}
+  # Runs schema.sql (ShedLock's lock table - not a JPA entity, so
+  # ddl-auto never creates it) on every boot; defer-datasource-initialization
+  # ensures Hibernate's own entity tables are created first.
+  sql:
+    init:
+      mode: always
+  jpa:
+    defer-datasource-initialization: true
 server:
   port: 8051
 
@@ -23,10 +31,15 @@ management:
     enable:
       jvm: true  # Ensure JVM metrics are enabled
 
+# service-url.defaultZone is profile-specific (see application-dev.yml /
+# application-prod.yml) since dev's own local Eureka needs credentials in
+# the URL and prod's doesn't - keeping one shared default here meant either
+# baking a credential into the profile-agnostic base file (so it silently
+# applies to prod too if EUREKA_SERVICE_URL is ever left unset there) or
+# dropping it from dev's convenient local default. Splitting per profile
+# avoids both.
 eureka:
   client:
-    service-url:
-      defaultZone: ${EUREKA_SERVICE_URL:http://localhost:8761/eureka/}
     fetch-registry: true
     register-with-eureka: true
   instance:

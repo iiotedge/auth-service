@@ -45,6 +45,15 @@ service:
 server:
   port: 8051
 
+# Local dev Eureka commonly runs with basic auth (admin/8506, the same
+# convention used for the DB/Redis passwords above) - kept as a fallback
+# default purely for local testing convenience. Override via
+# EUREKA_SERVICE_URL if your local Eureka isn't configured that way.
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVICE_URL:http://admin:8506@localhost:8761/eureka/}
+
 jwt:
   secret: "Vlo2vcFdiXGgWqZLEpLw6kk99sH8/4odgC2XgZV0IbA="
 

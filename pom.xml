@@ -22,6 +22,7 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <springdoc.version>2.8.5</springdoc.version>
         <jjwt.version>0.12.6</jjwt.version>
+        <shedlock.version>5.16.0</shedlock.version>
 
         <!-- Quality & security tooling -->
         <jacoco.version>0.8.12</jacoco.version>
@@ -65,6 +66,23 @@
                     <artifactId>spring-boot-starter-logging</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+
+        <!-- Distributed lock for @Scheduled jobs (TokenCleanupService) - without
+             this, every replica of this service runs the same cleanup sweep
+             independently and redundantly the moment it scales beyond one
+             instance. Uses a lock row in the existing Postgres DB via
+             JdbcTemplate (already on the classpath via spring-boot-starter-data-jpa),
+             no new infrastructure. See SchedulerLockConfig + schema.sql. -->
+        <dependency>
+            <groupId>net.javacrumbs.shedlock</groupId>
+            <artifactId>shedlock-spring</artifactId>
+            <version>${shedlock.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>net.javacrumbs.shedlock</groupId>
+            <artifactId>shedlock-provider-jdbc-template</artifactId>
+            <version>${shedlock.version}</version>
         </dependency>
 
         <dependency>

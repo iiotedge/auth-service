@@ -54,6 +54,14 @@ admin:
   seed:
     password: ${SUPER_ADMIN_PASSWORD:}
 
+# No embedded credential in the default, unlike dev's local convenience
+# fallback (application-dev.yml) - a real prod Eureka's auth belongs in
+# EUREKA_SERVICE_URL (or a K8s Secret feeding it), not a source-committed default.
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVICE_URL:http://localhost:8761/eureka/}
+
 server:
   port: 9051
 #  flyway:
