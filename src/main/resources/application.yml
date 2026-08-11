@@ -22,12 +22,14 @@ management:
       exposure:
         include: health,info,prometheus
       base-path: /actuator
+  endpoint:
     prometheus:
-      enabled: true  # Make sure this is enabled
-  metrics:
-    export:
-      prometheus:
+      access: unrestricted  # Make sure this endpoint is reachable
+  prometheus:
+    metrics:
+      export:
         enabled: true  # Enable Prometheus export
+  metrics:
     enable:
       jvm: true  # Ensure JVM metrics are enabled
 

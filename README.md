@@ -148,7 +148,7 @@ in the response body with the same value mirrored as the HTTP status.
 | `rate.limit.max-requests` / `.time-window` | 10 / 1 (minute) | Sliding-window limiter |
 | `cors.allowed-origins` | profile-specific | CSV of allowed origins |
 | `tenant.service.url` / `notification.service.url` | - | Downstream service URLs |
-| `spring.redis.host/port/password/ssl/timeout` | - | Redis connection (custom `RedisConfig`, not Boot's `spring.data.redis.*` auto-config) |
+| `spring.data.redis.host/port/password/ssl.enabled/timeout` | - | Redis connection (read by a custom `RedisConfig`/`LettuceConnectionFactory`, not Boot's `RedisAutoConfiguration`, so it needs its own `RedisTemplate` with JSON value serialization for `OtpStore`) |
 | `app.cleanup.token-interval` | 300000 (5 min, ms) | How often the token-cleanup sweep runs |
 | `app.cleanup.batch-size` | 500 | Rows deleted per batch in the sweep (capped at 20 batches/run) |
 | `eureka.client.service-url.defaultZone` | profile-specific | Dev's fallback includes local basic-auth creds for convenience; prod has none - see `application-{dev,prod}.yml` |

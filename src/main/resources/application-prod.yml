@@ -18,11 +18,12 @@ spring:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
   kafka:
     bootstrap-servers: kafka-service:9092
-  redis:
-    host: ${REDIS_HOST:redis}           # From Kubernetes ConfigMap or default to 'redis'
-    port: ${REDIS_PORT:6379}            # Default Redis port
-    password: ${REDIS_PASSWORD}         # Required - no fallback, use a K8s Secret in production
-    timeout: ${REDIS_TIMEOUT:2000}      # Connection timeout (ms)
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}           # From Kubernetes ConfigMap or default to 'redis'
+      port: ${REDIS_PORT:6379}            # Default Redis port
+      password: ${REDIS_PASSWORD}         # Required - no fallback, use a K8s Secret in production
+      timeout: ${REDIS_TIMEOUT:2000}      # Connection timeout (ms)
 
 rate:
   limit:

@@ -17,11 +17,12 @@ spring:
       ddl-auto: update
     database: postgresql
 #    database-platform: org.hibernate.dialect.PostgreSQLDialect
-  redis:
-    host: localhost  # The Redis service name in Docker Compose (could be 'localhost' in dev environments)
-    port: 6379   # Default Redis port
-    password: 8506  # Password for Redis if authentication is enabled
-    timeout: 2000  # Connection timeout for Redis (in ms)
+  data:
+    redis:
+      host: localhost  # The Redis service name in Docker Compose (could be 'localhost' in dev environments)
+      port: 6379   # Default Redis port
+      password: 8506  # Password for Redis if authentication is enabled
+      timeout: 2000  # Connection timeout for Redis (in ms)
 
 rate:
   limit:

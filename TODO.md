@@ -15,6 +15,15 @@ decision only the team can make.
 - ~~MFA on login~~ — done, but OTP-based rather than TOTP (see below).
 - ~~No CI pipeline~~ — `.github/workflows/ci.yml` added, but see its own
   header comment and the entry below - it's a stopgap, not the real fix.
+- ~~Deprecated Spring Boot 3.4.2 properties in all three profiles~~ —
+  `spring.redis.*` -> `spring.data.redis.*` (including `RedisConfig.java`'s
+  `@Value` lookups and the now-also-deprecated boolean `ssl` ->
+  `ssl.enabled`), and `management.metrics.export.prometheus.enabled` ->
+  `management.prometheus.metrics.export.enabled` /
+  `management.endpoint.prometheus.access: unrestricted` (Boot 3.4 replaced
+  the per-endpoint `enabled` boolean with an `access` level). Verified
+  against the actual `spring-configuration-metadata.json` bundled in the
+  3.4.2 jars, not guessed; 185/185 tests still pass.
 
 ## Architecture
 
