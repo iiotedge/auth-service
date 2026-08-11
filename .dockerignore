@@ -1,0 +1,4 @@
+# Keep the build context small and avoid ever baking local secrets/state
+# into an image layer - only target/auth-service.jar is actually needed.
+*
+!target/auth-service.jar

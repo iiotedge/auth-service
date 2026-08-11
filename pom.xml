@@ -366,8 +366,7 @@
                          only imported as a BOM, no plugin inheritance): Boot's own
                          pluginManagement already binds a default execution under
                          that same id, and without matching it here Maven treated
-                         this as a second, separate execution - repackaging twice,
-                         once to target/ and once (this one) to ../../out/. -->
+                         this as a second, separate execution. -->
                     <execution>
                         <id>repackage</id>
                         <goals>
@@ -376,7 +375,14 @@
                     </execution>
                 </executions>
                 <configuration>
-                    <outputDirectory>${project.basedir}/../../out</outputDirectory>
+                    <!-- No custom outputDirectory: the previous ../../out/ convention
+                         was a local-monorepo-dev convenience with nothing else
+                         referencing it, and it actively worked against CI/CD - it split
+                         the executable jar (there) from the plain pre-repackage jar
+                         (still left behind in target/), which is exactly the kind of
+                         thing that's easy to accidentally package into a Docker image.
+                         Standard Boot behavior (repackage in place in target/) is what
+                         the Dockerfile expects. -->
                     <excludes>
                         <exclude>
                             <groupId>org.projectlombok</groupId>
