@@ -166,6 +166,26 @@ class AuthenticationControllerTest {
             verify(userService, never()).verify(any(UserCredentialDTO.class));
         }
 
+        @Test
+        @DisplayName("does not issue a refresh cookie when MFA is required")
+        void loginWithMfaRequiredSkipsRefreshCookie() throws Exception {
+            Map<String, Object> mfaRequired = new HashMap<>();
+            mfaRequired.put("statusCode", 200);
+            mfaRequired.put("message", "MFA verification required");
+            mfaRequired.put("mfaRequired", true);
+            mfaRequired.put("identifier", "john.doe@iotmining.com");
+            when(userService.verify(any(UserCredentialDTO.class))).thenReturn(mfaRequired);
+
+            mockMvc.perform(post("/api/v1/auth/login")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(loginJson("john.doe", "Str0ng@Pass")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.mfaRequired").value(true))
+                    .andExpect(header().doesNotExist(HttpHeaders.SET_COOKIE));
+
+            verify(refreshTokenService, never()).createRefreshToken(any(UUID.class), anyString());
+        }
+
         private Map<String, Object> successLoginResponse(String accessToken) {
             Map<String, Object> response = new HashMap<>();
             response.put("statusCode", 200);
@@ -207,7 +227,7 @@ class AuthenticationControllerTest {
         }
 
         @Test
-        @DisplayName("revokes the session when the request IP differs from the bound IP")
+        @DisplayName("revokes the whole token family when the request IP differs from the bound IP")
         void ipMismatchRevokesSession() throws Exception {
             User user = TestDataFactory.user("john.doe", "ROLE_USER");
             RefreshToken token = TestDataFactory.refreshToken(user, "198.51.100.9",
@@ -220,7 +240,27 @@ class AuthenticationControllerTest {
                     .andExpect(jsonPath("$.message").value(containsString("Unusual activity")))
                     .andExpect(header().string(HttpHeaders.SET_COOKIE, containsString("Max-Age=0")));
 
-            verify(refreshTokenService).deleteByToken(token.getToken());
+            verify(refreshTokenService).revokeFamily(token.getFamilyId());
+        }
+
+        @Test
+        @DisplayName("revokes the whole token family when an already-rotated-away token is replayed")
+        void reuseOfARevokedTokenRevokesTheWholeFamily() throws Exception {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            RefreshToken token = TestDataFactory.refreshToken(user, null,
+                    Instant.now().plus(Duration.ofDays(1)));
+            token.setRevoked(true);
+            when(refreshTokenService.findByToken(token.getToken())).thenReturn(Optional.of(token));
+
+            mockMvc.perform(post("/api/v1/auth/refresh")
+                            .cookie(new Cookie(REFRESH_COOKIE, token.getToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.message").value(containsString("Unusual activity")))
+                    .andExpect(header().string(HttpHeaders.SET_COOKIE, containsString("Max-Age=0")));
+
+            verify(refreshTokenService).revokeFamily(token.getFamilyId());
+            verify(refreshTokenService, never()).verifyExpiration(any());
+            verify(refreshTokenService, never()).rotateRefreshToken(any());
         }
 
         @Test
@@ -427,6 +467,147 @@ class AuthenticationControllerTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"identifier\":\"john.doe@example.com\"}"))
                     .andExpect(status().isTooManyRequests());
+        }
+    }
+
+    // ==============================================================================
+    // PASSWORD RESET
+    // ==============================================================================
+    @Nested
+    @DisplayName("password reset")
+    class PasswordReset {
+
+        @Test
+        @DisplayName("init passes the service status code through")
+        void initPassesThroughStatus() throws Exception {
+            Map<String, Object> accepted = new HashMap<>();
+            accepted.put("statusCode", 200);
+            accepted.put("message", "If an account exists for that identifier, a password reset code has been sent.");
+            when(userService.initiatePasswordReset(any())).thenReturn(accepted);
+
+            mockMvc.perform(post("/api/v1/auth/password-reset/init")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"identifier\":\"john.doe@example.com\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.message").value(containsString("If an account exists")));
+        }
+
+        @Test
+        @DisplayName("init rejects a payload without an identifier")
+        void initRejectsMissingIdentifier() throws Exception {
+            mockMvc.perform(post("/api/v1/auth/password-reset/init")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{}"))
+                    .andExpect(status().isBadRequest());
+
+            verify(userService, never()).initiatePasswordReset(any());
+        }
+
+        @Test
+        @DisplayName("confirm passes the service status code through (429 when the attempt cap is hit)")
+        void confirmPassesThroughStatus() throws Exception {
+            Map<String, Object> throttled = new HashMap<>();
+            throttled.put("statusCode", 429);
+            throttled.put("message", "Too many incorrect attempts. Please request a new code.");
+            when(userService.confirmPasswordReset(any())).thenReturn(throttled);
+
+            mockMvc.perform(post("/api/v1/auth/password-reset/confirm")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"identifier\":\"john.doe@example.com\",\"otp\":\"123456\",\"newPassword\":\"NewStr0ng@Pass\"}"))
+                    .andExpect(status().isTooManyRequests());
+        }
+
+        @Test
+        @DisplayName("confirm rejects a weak new password before reaching the service")
+        void confirmRejectsWeakPassword() throws Exception {
+            mockMvc.perform(post("/api/v1/auth/password-reset/confirm")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"identifier\":\"john.doe@example.com\",\"otp\":\"123456\",\"newPassword\":\"weak\"}"))
+                    .andExpect(status().isBadRequest());
+
+            verify(userService, never()).confirmPasswordReset(any());
+        }
+    }
+
+    // ==============================================================================
+    // MFA
+    // ==============================================================================
+    @Nested
+    @DisplayName("MFA")
+    class Mfa {
+
+        @Test
+        @DisplayName("verify issues a refresh cookie on success, same as a completed login")
+        void verifyIssuesRefreshCookieOnSuccess() throws Exception {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            String accessToken = JwtTokenProvider.generateAccessToken(user);
+            Map<String, Object> success = new HashMap<>();
+            success.put("statusCode", 200);
+            success.put("message", "Login successful");
+            success.put("data", new AuthResponseDTO(accessToken, true));
+            when(userService.verifyMfa(any())).thenReturn(success);
+            RefreshToken refreshToken = TestDataFactory.refreshToken(user, "127.0.0.1",
+                    Instant.now().plus(Duration.ofDays(7)));
+            when(refreshTokenService.createRefreshToken(eq(user.getUserId()), anyString()))
+                    .thenReturn(refreshToken);
+
+            mockMvc.perform(post("/api/v1/auth/mfa/verify")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"identifier\":\"john.doe@iotmining.com\",\"otp\":\"123456\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.accessToken").value(accessToken))
+                    .andExpect(header().string(HttpHeaders.SET_COOKIE,
+                            containsString(REFRESH_COOKIE + "=" + refreshToken.getToken())));
+        }
+
+        @Test
+        @DisplayName("verify passes through a rejection without a refresh cookie")
+        void verifyPassesThroughRejection() throws Exception {
+            Map<String, Object> rejected = new HashMap<>();
+            rejected.put("statusCode", 400);
+            rejected.put("message", "Invalid or expired code.");
+            when(userService.verifyMfa(any())).thenReturn(rejected);
+
+            mockMvc.perform(post("/api/v1/auth/mfa/verify")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"identifier\":\"john.doe@iotmining.com\",\"otp\":\"000000\"}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(header().doesNotExist(HttpHeaders.SET_COOKIE));
+        }
+
+        @Test
+        @DisplayName("enable requires authentication and delegates to the caller's own user id")
+        void enableDelegatesToCallersUserId() throws Exception {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            Map<String, Object> enabled = Map.of("statusCode", 200, "message", "Multi-factor authentication enabled.");
+            when(userService.enableMfa(user.getUserId())).thenReturn(enabled);
+
+            mockMvc.perform(post("/api/v1/auth/mfa/enable")
+                            .principal(authenticationFor(user)))
+                    .andExpect(status().isOk());
+
+            verify(userService).enableMfa(user.getUserId());
+        }
+
+        @Test
+        @DisplayName("disable passes the current password through and delegates to the caller's own user id")
+        void disableDelegatesToCallersUserId() throws Exception {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            Map<String, Object> disabled = Map.of("statusCode", 200, "message", "Multi-factor authentication disabled.");
+            when(userService.disableMfa(user.getUserId(), "Str0ng@Pass")).thenReturn(disabled);
+
+            mockMvc.perform(post("/api/v1/auth/mfa/disable")
+                            .principal(authenticationFor(user))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"currentPassword\":\"Str0ng@Pass\"}"))
+                    .andExpect(status().isOk());
+
+            verify(userService).disableMfa(user.getUserId(), "Str0ng@Pass");
+        }
+
+        private Authentication authenticationFor(User user) {
+            UserPrincipal principal = new UserPrincipal(user);
+            return new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
         }
     }
 

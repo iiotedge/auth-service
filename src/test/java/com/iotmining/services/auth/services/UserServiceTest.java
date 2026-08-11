@@ -76,6 +76,7 @@ class UserServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     @Mock private OtpStore otpStore;
+    @Mock private RefreshTokenService refreshTokenService;
 
     private UserService userService;
 
@@ -83,7 +84,8 @@ class UserServiceTest {
     void setUp() {
         TestDataFactory.initJwtProvider();
         userService = new UserService(authenticationManager, userLoginDataService, userRepository,
-                roleRepository, passwordEncoder, restTemplate, notificationClient, redis, objectMapper, otpStore);
+                roleRepository, passwordEncoder, restTemplate, notificationClient, redis, objectMapper, otpStore,
+                refreshTokenService);
         ReflectionTestUtils.setField(userService, "tenantServiceUrl", TENANT_SERVICE_URL);
         ReflectionTestUtils.setField(userService, "notificationBaseUrl", "http://notification:8087");
         ReflectionTestUtils.setField(userService, "maxFailedLoginAttempts", 5);
@@ -195,7 +197,7 @@ class UserServiceTest {
 
             assertThat(response.get("statusCode")).isEqualTo(400);
             assertThat((String) response.get("message")).contains("Authorization Error");
-            verify(otpStore, never()).saveNew(anyString(), anyString(), anyMap(), any());
+            verify(otpStore, never()).saveNew(anyString(), anyString(), anyString(), anyMap(), any());
         }
 
         @Test
@@ -207,7 +209,7 @@ class UserServiceTest {
             Map<String, Object> response = userService.registerInit(request);
 
             assertThat(response.get("statusCode")).isEqualTo(409);
-            verify(otpStore, never()).saveNew(anyString(), anyString(), anyMap(), any());
+            verify(otpStore, never()).saveNew(anyString(), anyString(), anyString(), anyMap(), any());
         }
 
         @Test
@@ -226,7 +228,7 @@ class UserServiceTest {
             Map<String, Object> data = (Map<String, Object>) response.get("data");
             assertThat((String) data.get("prospectId")).isNotBlank();
             assertThat(data.get("otpChannel")).isEqualTo("EMAIL");
-            verify(otpStore).saveNew(anyString(), eq("123456"), anyMap(), any());
+            verify(otpStore).saveNew(anyString(), anyString(), eq("123456"), anyMap(), any());
             verify(valueOps).set(contains("reg:prospect:"), anyString(), any());
             verify(valueOps).set(contains("reg:index:EMAIL:"), anyString(), any());
         }
@@ -304,7 +306,7 @@ class UserServiceTest {
         void rejectsInvalidOtp() {
             when(redis.opsForValue()).thenReturn(valueOps);
             when(valueOps.get(indexKey)).thenReturn(prospectId);
-            when(otpStore.verify(prospectId, "000000")).thenReturn(false);
+            when(otpStore.verify(OtpStore.PURPOSE_SIGNUP, prospectId, "000000")).thenReturn(false);
 
             Map<String, Object> response = userService.verifyOtp(verifyRequest("000000"));
 
@@ -342,7 +344,7 @@ class UserServiceTest {
             assertThat(saved.getTenantId()).isEqualTo(tenantId);
             assertThat(saved.getIsAccountActive()).isTrue();
 
-            verify(otpStore).delete(prospectId);
+            verify(otpStore).delete(OtpStore.PURPOSE_SIGNUP, prospectId);
             verify(redis).delete(regKey);
         }
 
@@ -388,7 +390,7 @@ class UserServiceTest {
         private void stubValidOtpSession() throws Exception {
             when(redis.opsForValue()).thenReturn(valueOps);
             when(valueOps.get(indexKey)).thenReturn(prospectId);
-            when(otpStore.verify(prospectId, "123456")).thenReturn(true);
+            when(otpStore.verify(OtpStore.PURPOSE_SIGNUP, prospectId, "123456")).thenReturn(true);
             when(valueOps.get(regKey)).thenReturn(objectMapper.writeValueAsString(registration));
         }
 
@@ -435,12 +437,12 @@ class UserServiceTest {
         void enforcesResendBudget() throws Exception {
             stubPendingRegistration();
             doThrow(new RuntimeException("Resend limit reached"))
-                    .when(otpStore).ensureResendBudget(prospectId, 5);
+                    .when(otpStore).ensureResendBudget(OtpStore.PURPOSE_SIGNUP, prospectId, 5);
 
             Map<String, Object> response = userService.resendOtp(resendRequest());
 
             assertThat(response.get("statusCode")).isEqualTo(429);
-            verify(otpStore, never()).replaceOtp(anyString(), anyString(), anyMap(), any());
+            verify(otpStore, never()).replaceOtp(anyString(), anyString(), anyString(), anyMap(), any());
         }
 
         @Test
@@ -453,7 +455,7 @@ class UserServiceTest {
             Map<String, Object> response = userService.resendOtp(resendRequest());
 
             assertThat(response.get("statusCode")).isEqualTo(202);
-            verify(otpStore).replaceOtp(eq(prospectId), eq("654321"), anyMap(), any());
+            verify(otpStore).replaceOtp(eq(OtpStore.PURPOSE_SIGNUP), eq(prospectId), eq("654321"), anyMap(), any());
             verify(valueOps).set(eq(regKey), anyString(), any());
         }
 
@@ -577,6 +579,260 @@ class UserServiceTest {
 
             assertThat(userService.findUsersByTenantId(tenantId)).isEmpty();
         }
+    }
+
+    @Nested
+    @DisplayName("MFA")
+    class Mfa {
+
+        private void stubAuthenticatedPrincipal(User user) {
+            Authentication authentication = mock(Authentication.class);
+            when(authentication.getPrincipal()).thenReturn(new UserPrincipal(user));
+            when(authenticationManager.authenticate(any())).thenReturn(authentication);
+        }
+
+        @Test
+        @DisplayName("login withholds the access token and sends an OTP when MFA is enabled")
+        void loginChallengesMfaInsteadOfIssuingATokenWhenEnabled() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            user.setMfaEnabled(true);
+            stubAuthenticatedPrincipal(user);
+            when(otpStore.generateCode()).thenReturn("123456");
+            stubNotificationDelivery(true);
+
+            Map<String, Object> response = userService.verify(new UserCredentialDTO("john.doe", "Str0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(200);
+            assertThat(response.get("mfaRequired")).isEqualTo(true);
+            assertThat(response).doesNotContainKey("data");
+            assertThat(response.get("identifier")).isEqualTo(user.getEmail());
+            verify(otpStore).saveNew(eq(OtpStore.PURPOSE_LOGIN_MFA), eq(user.getEmail()), eq("123456"), anyMap(), any());
+            verify(userLoginDataService, never()).addUserAsyncLoginData(any());
+        }
+
+        @Test
+        @DisplayName("login issues a token directly when MFA is not enabled")
+        void loginSkipsMfaWhenDisabled() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            user.setMfaEnabled(false);
+            stubAuthenticatedPrincipal(user);
+
+            Map<String, Object> response = userService.verify(new UserCredentialDTO("john.doe", "Str0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(200);
+            assertThat(response).doesNotContainKey("mfaRequired");
+            assertThat(response.get("data")).isInstanceOf(AuthResponseDTO.class);
+        }
+
+        @Nested
+        @DisplayName("verifyMfa")
+        class VerifyMfaTests {
+
+            @Test
+            @DisplayName("issues a token on a correct OTP and clears it afterward")
+            void issuesTokenOnCorrectOtp() {
+                User user = TestDataFactory.user("john.doe", "ROLE_USER");
+                when(otpStore.get(OtpStore.PURPOSE_LOGIN_MFA, user.getEmail())).thenReturn(Map.of("attempts", 0));
+                when(otpStore.verify(OtpStore.PURPOSE_LOGIN_MFA, user.getEmail(), "123456")).thenReturn(true);
+                when(userRepository.findByUsernameOrEmail(user.getEmail())).thenReturn(Optional.of(user));
+
+                Map<String, Object> response = userService.verifyMfa(mfaVerify(user.getEmail(), "123456"));
+
+                assertThat(response.get("statusCode")).isEqualTo(200);
+                assertThat(response.get("data")).isInstanceOf(AuthResponseDTO.class);
+                verify(otpStore).delete(OtpStore.PURPOSE_LOGIN_MFA, user.getEmail());
+            }
+
+            @Test
+            @DisplayName("rejects an incorrect OTP and records the attempt")
+            void rejectsWrongOtp() {
+                when(otpStore.get(OtpStore.PURPOSE_LOGIN_MFA, "john.doe@iotmining.com")).thenReturn(Map.of("attempts", 0));
+                when(otpStore.verify(OtpStore.PURPOSE_LOGIN_MFA, "john.doe@iotmining.com", "000000")).thenReturn(false);
+
+                Map<String, Object> response = userService.verifyMfa(mfaVerify("john.doe@iotmining.com", "000000"));
+
+                assertThat(response.get("statusCode")).isEqualTo(400);
+                verify(otpStore).incrementAttempts(OtpStore.PURPOSE_LOGIN_MFA, "john.doe@iotmining.com");
+            }
+
+            @Test
+            @DisplayName("rejects once the attempt cap is reached")
+            void rejectsAfterTooManyAttempts() {
+                when(otpStore.get(OtpStore.PURPOSE_LOGIN_MFA, "john.doe@iotmining.com"))
+                        .thenReturn(Map.of("attempts", 5));
+
+                Map<String, Object> response = userService.verifyMfa(mfaVerify("john.doe@iotmining.com", "123456"));
+
+                assertThat(response.get("statusCode")).isEqualTo(429);
+                verify(otpStore, never()).verify(anyString(), anyString(), anyString());
+            }
+        }
+
+        @Nested
+        @DisplayName("enableMfa / disableMfa")
+        class EnableDisableMfa {
+
+            @Test
+            @DisplayName("enableMfa sets the flag")
+            void enablesMfa() {
+                User user = TestDataFactory.user("john.doe", "ROLE_USER");
+                when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
+
+                Map<String, Object> response = userService.enableMfa(user.getUserId());
+
+                assertThat(response.get("statusCode")).isEqualTo(200);
+                assertThat(user.getMfaEnabled()).isTrue();
+                verify(userRepository).save(user);
+            }
+
+            @Test
+            @DisplayName("disableMfa clears the flag when the current password matches")
+            void disablesMfaWithCorrectPassword() {
+                User user = TestDataFactory.user("john.doe", "ROLE_USER");
+                user.setMfaEnabled(true);
+                when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
+                when(passwordEncoder.matches("Str0ng@Pass", user.getPassword())).thenReturn(true);
+
+                Map<String, Object> response = userService.disableMfa(user.getUserId(), "Str0ng@Pass");
+
+                assertThat(response.get("statusCode")).isEqualTo(200);
+                assertThat(user.getMfaEnabled()).isFalse();
+                verify(userRepository).save(user);
+            }
+
+            @Test
+            @DisplayName("disableMfa rejects an incorrect current password and leaves MFA enabled")
+            void disableMfaRejectsWrongPassword() {
+                User user = TestDataFactory.user("john.doe", "ROLE_USER");
+                user.setMfaEnabled(true);
+                when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
+                when(passwordEncoder.matches("wrong", user.getPassword())).thenReturn(false);
+
+                Map<String, Object> response = userService.disableMfa(user.getUserId(), "wrong");
+
+                assertThat(response.get("statusCode")).isEqualTo(401);
+                assertThat(user.getMfaEnabled()).isTrue();
+                verify(userRepository, never()).save(any());
+            }
+        }
+    }
+
+    private com.iotmining.services.auth.dto.MfaVerifyRequest mfaVerify(String identifier, String otp) {
+        com.iotmining.services.auth.dto.MfaVerifyRequest dto = new com.iotmining.services.auth.dto.MfaVerifyRequest();
+        dto.setIdentifier(identifier);
+        dto.setOtp(otp);
+        return dto;
+    }
+
+    @Nested
+    @DisplayName("initiatePasswordReset")
+    class InitiatePasswordReset {
+
+        @Test
+        @DisplayName("returns the generic message without sending anything for an unknown identifier")
+        void unknownIdentifierGetsTheGenericResponse() {
+            when(userRepository.findByUsernameOrEmail("ghost@example.com")).thenReturn(Optional.empty());
+
+            Map<String, Object> response = userService.initiatePasswordReset(resetInit("ghost@example.com"));
+
+            assertThat(response.get("statusCode")).isEqualTo(200);
+            assertThat((String) response.get("message")).contains("If an account exists");
+            verify(otpStore, never()).saveNew(anyString(), anyString(), anyString(), anyMap(), any());
+        }
+
+        @Test
+        @DisplayName("sends an OTP under the password-reset purpose for a known identifier, with the same generic response")
+        void knownIdentifierSendsOtpWithTheSameGenericResponse() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            when(userRepository.findByUsernameOrEmail(user.getEmail())).thenReturn(Optional.of(user));
+            when(otpStore.generateCode()).thenReturn("123456");
+            stubNotificationDelivery(true);
+
+            Map<String, Object> response = userService.initiatePasswordReset(resetInit(user.getEmail()));
+
+            assertThat(response.get("statusCode")).isEqualTo(200);
+            assertThat((String) response.get("message")).contains("If an account exists");
+            verify(otpStore).saveNew(eq(OtpStore.PURPOSE_PASSWORD_RESET), eq(user.getEmail()), eq("123456"), anyMap(), any());
+        }
+    }
+
+    @Nested
+    @DisplayName("confirmPasswordReset")
+    class ConfirmPasswordReset {
+
+        @Test
+        @DisplayName("resets the password, clears the OTP, and revokes every existing session")
+        void resetsPasswordAndRevokesSessions() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            when(otpStore.get(OtpStore.PURPOSE_PASSWORD_RESET, user.getEmail())).thenReturn(Map.of("attempts", 0));
+            when(otpStore.verify(OtpStore.PURPOSE_PASSWORD_RESET, user.getEmail(), "654321")).thenReturn(true);
+            when(userRepository.findByUsernameOrEmail(user.getEmail())).thenReturn(Optional.of(user));
+            when(passwordEncoder.encode("NewStr0ng@Pass")).thenReturn("encoded-new-hash");
+
+            Map<String, Object> response = userService.confirmPasswordReset(resetConfirm(user.getEmail(), "654321", "NewStr0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(200);
+            assertThat(user.getPassword()).isEqualTo("encoded-new-hash");
+            verify(userRepository).save(user);
+            verify(otpStore).delete(OtpStore.PURPOSE_PASSWORD_RESET, user.getEmail());
+            verify(refreshTokenService).revokeAllForUser(user);
+        }
+
+        @Test
+        @DisplayName("rejects an incorrect OTP and records the attempt")
+        void rejectsWrongOtp() {
+            when(otpStore.get(OtpStore.PURPOSE_PASSWORD_RESET, "john.doe@iotmining.com")).thenReturn(Map.of("attempts", 0));
+            when(otpStore.verify(OtpStore.PURPOSE_PASSWORD_RESET, "john.doe@iotmining.com", "000000")).thenReturn(false);
+
+            Map<String, Object> response = userService.confirmPasswordReset(
+                    resetConfirm("john.doe@iotmining.com", "000000", "NewStr0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(400);
+            verify(otpStore).incrementAttempts(OtpStore.PURPOSE_PASSWORD_RESET, "john.doe@iotmining.com");
+            verify(userRepository, never()).save(any());
+            verify(refreshTokenService, never()).revokeAllForUser(any());
+        }
+
+        @Test
+        @DisplayName("rejects once the attempt cap is reached, without even checking the OTP")
+        void rejectsAfterTooManyAttempts() {
+            when(otpStore.get(OtpStore.PURPOSE_PASSWORD_RESET, "john.doe@iotmining.com"))
+                    .thenReturn(Map.of("attempts", 5));
+
+            Map<String, Object> response = userService.confirmPasswordReset(
+                    resetConfirm("john.doe@iotmining.com", "123456", "NewStr0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(429);
+            verify(otpStore, never()).verify(anyString(), anyString(), anyString());
+        }
+
+        @Test
+        @DisplayName("stays generic if the OTP is valid but the account is gone")
+        void staysGenericWhenAccountMissingAfterValidOtp() {
+            when(otpStore.get(OtpStore.PURPOSE_PASSWORD_RESET, "ghost@example.com")).thenReturn(Map.of("attempts", 0));
+            when(otpStore.verify(OtpStore.PURPOSE_PASSWORD_RESET, "ghost@example.com", "654321")).thenReturn(true);
+            when(userRepository.findByUsernameOrEmail("ghost@example.com")).thenReturn(Optional.empty());
+
+            Map<String, Object> response = userService.confirmPasswordReset(
+                    resetConfirm("ghost@example.com", "654321", "NewStr0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(400);
+            verify(refreshTokenService, never()).revokeAllForUser(any());
+        }
+    }
+
+    private com.iotmining.services.auth.dto.PasswordResetInitDTO resetInit(String identifier) {
+        com.iotmining.services.auth.dto.PasswordResetInitDTO dto = new com.iotmining.services.auth.dto.PasswordResetInitDTO();
+        dto.setIdentifier(identifier);
+        return dto;
+    }
+
+    private com.iotmining.services.auth.dto.PasswordResetConfirmDTO resetConfirm(String identifier, String otp, String newPassword) {
+        com.iotmining.services.auth.dto.PasswordResetConfirmDTO dto = new com.iotmining.services.auth.dto.PasswordResetConfirmDTO();
+        dto.setIdentifier(identifier);
+        dto.setOtp(otp);
+        dto.setNewPassword(newPassword);
+        return dto;
     }
 
     // ==============================================================================

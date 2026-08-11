@@ -28,25 +28,27 @@ public class RefreshTokenService {
     }
 
     /**
-     * UPDATED: Now accepts ipAddress for security binding.
+     * Starts a brand new token family for a fresh login - any previous
+     * session for this user is hard-deleted first (this service supports
+     * one active session per user; an explicit new login intentionally
+     * ends the old one, which is a different situation from rotation
+     * reusing a family - see rotateRefreshToken).
      */
     @Transactional
     public RefreshToken createRefreshToken(UUID userId, String ipAddress) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
 
-        // 1. DELETE EXISTING TOKEN
         refreshTokenRepository.deleteByUser(user);
         refreshTokenRepository.flush(); // Prevent Duplicate Key error
 
-        // 2. CREATE NEW TOKEN
         RefreshToken refreshToken = new RefreshToken();
         refreshToken.setUser(user);
         refreshToken.setExpiryDate(Instant.now().plusMillis(refreshTokenDurationMs));
         refreshToken.setToken(UUID.randomUUID().toString());
-
-        // 3. SET IP ADDRESS (Make sure your Entity has this field!)
         refreshToken.setIpAddress(ipAddress);
+        refreshToken.setFamilyId(UUID.randomUUID());
+        refreshToken.setRevoked(false);
 
         return refreshTokenRepository.save(refreshToken);
     }
@@ -76,12 +78,40 @@ public class RefreshTokenService {
     }
 
     /**
-     * Rotates a token and PRESERVES the IP address of the original session.
+     * Rotates a token within its existing family: marks the presented token
+     * revoked (kept, not deleted, until it naturally expires - that's what
+     * lets a later replay of this exact token be recognized as reuse) and
+     * issues a new token carrying the same familyId and IP binding.
+     * Deliberately does NOT go through createRefreshToken, since that
+     * deletes all of the user's existing rows first - it would delete the
+     * very row this method just marked revoked, destroying the reuse signal.
      */
     @Transactional
     public RefreshToken rotateRefreshToken(RefreshToken oldToken) {
-        // Pass the IP from the OLD token to the NEW one so the session stays bound to that IP
-        return createRefreshToken(oldToken.getUser().getUserId(), oldToken.getIpAddress());
+        oldToken.setRevoked(true);
+        oldToken.setRevokedAt(Instant.now());
+        refreshTokenRepository.save(oldToken);
+
+        RefreshToken newToken = new RefreshToken();
+        newToken.setUser(oldToken.getUser());
+        newToken.setExpiryDate(Instant.now().plusMillis(refreshTokenDurationMs));
+        newToken.setToken(UUID.randomUUID().toString());
+        newToken.setIpAddress(oldToken.getIpAddress());
+        newToken.setFamilyId(oldToken.getFamilyId());
+        newToken.setRevoked(false);
+
+        return refreshTokenRepository.save(newToken);
+    }
+
+    /**
+     * Reuse-detection response - revokes every token in the family, not
+     * just the one that was replayed, so a legitimate token an attacker
+     * hasn't used yet (or vice versa) is invalidated too. Forces a full
+     * re-login.
+     */
+    @Transactional
+    public void revokeFamily(UUID familyId) {
+        refreshTokenRepository.revokeFamily(familyId, Instant.now());
     }
 
     /**
@@ -92,5 +122,9 @@ public class RefreshTokenService {
         refreshTokenRepository.findByToken(token).ifPresent(refreshTokenRepository::delete);
     }
 
+    /** Ends every active session for a user - used when a password reset or account compromise means every existing session must die. */
+    @Transactional
+    public void revokeAllForUser(User user) {
+        refreshTokenRepository.deleteByUser(user);
+    }
 }
-

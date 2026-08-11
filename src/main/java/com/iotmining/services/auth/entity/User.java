@@ -47,6 +47,10 @@ public class User {
     @Column(name = "locked_until")
     private Instant lockedUntil;
 
+    /** Opt-in second factor at login - see UserService.verify()/verifyMfa(). Null/false means MFA is off. */
+    @Column(name = "mfa_enabled")
+    private Boolean mfaEnabled;
+
     @ManyToMany(fetch = FetchType.EAGER, cascade = CascadeType.MERGE)
     @JoinTable(
             name = "user_roles",

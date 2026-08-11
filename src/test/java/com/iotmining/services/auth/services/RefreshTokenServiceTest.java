@@ -51,7 +51,7 @@ class RefreshTokenServiceTest {
     class CreateRefreshToken {
 
         @Test
-        @DisplayName("issues an opaque token bound to the user, IP, and configured expiry")
+        @DisplayName("issues an opaque token bound to the user, IP, and configured expiry, starting a fresh family")
         void createsTokenWithIpBinding() {
             User user = TestDataFactory.user("john.doe", "ROLE_USER");
             when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
@@ -66,6 +66,8 @@ class RefreshTokenServiceTest {
             assertThat(UUID.fromString(token.getToken())).isNotNull(); // opaque, unguessable format
             assertThat(token.getExpiryDate())
                     .isCloseTo(before.plusMillis(SEVEN_DAYS_MS), within(5, java.time.temporal.ChronoUnit.SECONDS));
+            assertThat(token.getFamilyId()).isNotNull();
+            assertThat(token.isRevoked()).isFalse();
         }
 
         @Test
@@ -169,12 +171,11 @@ class RefreshTokenServiceTest {
     class RotateRefreshToken {
 
         @Test
-        @DisplayName("issues a new token value while preserving the original IP binding")
-        void rotationPreservesIpBinding() {
+        @DisplayName("issues a new token value while preserving the original IP binding and family")
+        void rotationPreservesIpBindingAndFamily() {
             User user = TestDataFactory.user("john.doe", "ROLE_USER");
             RefreshToken oldToken = TestDataFactory.refreshToken(user, "203.0.113.7",
                     Instant.now().plus(Duration.ofDays(1)));
-            when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
             when(refreshTokenRepository.save(any(RefreshToken.class)))
                     .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -182,6 +183,56 @@ class RefreshTokenServiceTest {
 
             assertThat(rotated.getIpAddress()).isEqualTo("203.0.113.7");
             assertThat(rotated.getToken()).isNotEqualTo(oldToken.getToken());
+            assertThat(rotated.getFamilyId()).isEqualTo(oldToken.getFamilyId());
+            assertThat(rotated.isRevoked()).isFalse();
+        }
+
+        @Test
+        @DisplayName("marks the presented token revoked instead of deleting it")
+        void marksOldTokenRevoked() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            RefreshToken oldToken = TestDataFactory.refreshToken(user, null,
+                    Instant.now().plus(Duration.ofDays(1)));
+            when(refreshTokenRepository.save(any(RefreshToken.class)))
+                    .thenAnswer(invocation -> invocation.getArgument(0));
+
+            refreshTokenService.rotateRefreshToken(oldToken);
+
+            assertThat(oldToken.isRevoked()).isTrue();
+            assertThat(oldToken.getRevokedAt()).isNotNull();
+            verify(refreshTokenRepository, never()).delete(any());
+            verify(refreshTokenRepository, never()).deleteByUser(any());
+            verify(refreshTokenRepository, never()).flush();
+        }
+    }
+
+    @Nested
+    @DisplayName("revokeFamily")
+    class RevokeFamily {
+
+        @Test
+        @DisplayName("delegates to the repository with the family id and a timestamp")
+        void revokesTheFamily() {
+            UUID familyId = UUID.randomUUID();
+
+            refreshTokenService.revokeFamily(familyId);
+
+            verify(refreshTokenRepository).revokeFamily(org.mockito.ArgumentMatchers.eq(familyId), any(Instant.class));
+        }
+    }
+
+    @Nested
+    @DisplayName("revokeAllForUser")
+    class RevokeAllForUser {
+
+        @Test
+        @DisplayName("deletes every token row for the user")
+        void deletesAllTokensForUser() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+
+            refreshTokenService.revokeAllForUser(user);
+
+            verify(refreshTokenRepository).deleteByUser(user);
         }
     }
 

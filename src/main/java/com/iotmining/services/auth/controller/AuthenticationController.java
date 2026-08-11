@@ -1,8 +1,12 @@
 package com.iotmining.services.auth.controller;
 
 import com.iotmining.services.auth.dto.AuthResponseDTO;
+import com.iotmining.services.auth.dto.DisableMfaRequest;
+import com.iotmining.services.auth.dto.MfaVerifyRequest;
 import com.iotmining.services.auth.dto.OtpResendRequest;
 import com.iotmining.services.auth.dto.OtpVerifyRequest;
+import com.iotmining.services.auth.dto.PasswordResetConfirmDTO;
+import com.iotmining.services.auth.dto.PasswordResetInitDTO;
 import com.iotmining.services.auth.dto.RegisterDTO;
 import com.iotmining.services.auth.dto.UserCreateDTO;
 import com.iotmining.services.auth.dto.UserCredentialDTO;
@@ -17,6 +21,7 @@ import io.jsonwebtoken.Claims;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
@@ -39,6 +44,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/v1/auth")
 @RequiredArgsConstructor
@@ -54,7 +60,37 @@ public class AuthenticationController {
     @PostMapping("/login")
     public ResponseEntity<Map<String, Object>> login(@Valid @RequestBody UserCredentialDTO credentials,
                                                        HttpServletRequest request) {
-        Map<String, Object> result = userService.verify(credentials);
+        return finalizeAuthResult(userService.verify(credentials), request);
+    }
+
+    // MFA-required responses from UserService.verify() carry no "data" key
+    // (see UserService.challengeMfa's doc comment), so finalizeAuthResult
+    // already skips issuing a refresh cookie for those - only a completed
+    // verifyMfa() call (same shape as a successful login) gets one.
+    @RateLimited
+    @PostMapping("/mfa/verify")
+    public ResponseEntity<Map<String, Object>> verifyMfa(@Valid @RequestBody MfaVerifyRequest request,
+                                                           HttpServletRequest httpRequest) {
+        return finalizeAuthResult(userService.verifyMfa(request), httpRequest);
+    }
+
+    @PostMapping("/mfa/enable")
+    public ResponseEntity<Map<String, Object>> enableMfa(Authentication authentication) {
+        UUID userId = ((UserPrincipal) authentication.getPrincipal()).getUser().getUserId();
+        Map<String, Object> result = userService.enableMfa(userId);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    @PostMapping("/mfa/disable")
+    public ResponseEntity<Map<String, Object>> disableMfa(@Valid @RequestBody DisableMfaRequest request,
+                                                            Authentication authentication) {
+        UUID userId = ((UserPrincipal) authentication.getPrincipal()).getUser().getUserId();
+        Map<String, Object> result = userService.disableMfa(userId, request.getCurrentPassword());
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    /** Shared by /login and /mfa/verify - both end with the same {statusCode, data: AuthResponseDTO} shape on success. */
+    private ResponseEntity<Map<String, Object>> finalizeAuthResult(Map<String, Object> result, HttpServletRequest request) {
         int statusCode = (Integer) result.get("statusCode");
 
         if (statusCode == HttpStatus.OK.value() && result.get("data") instanceof AuthResponseDTO authResponse) {
@@ -84,9 +120,22 @@ public class AuthenticationController {
         }
 
         RefreshToken token = tokenOpt.get();
+
+        // Reuse detection: this exact token was already rotated away from
+        // (see RefreshTokenService.rotateRefreshToken) - someone is
+        // replaying a token this service no longer considers current, the
+        // classic sign of a stolen refresh token. Revoke the whole family,
+        // not just this token, and force a full re-login.
+        if (token.isRevoked()) {
+            refreshTokenService.revokeFamily(token.getFamilyId());
+            log.warn("Refresh token reuse detected for user {} (family {})",
+                    token.getUser().getUserId(), token.getFamilyId());
+            return clearedCookieResponse("Unusual activity detected, please login again.");
+        }
+
         String clientIp = resolveClientIp(request);
         if (token.getIpAddress() != null && !token.getIpAddress().equals(clientIp)) {
-            refreshTokenService.deleteByToken(token.getToken());
+            refreshTokenService.revokeFamily(token.getFamilyId());
             return clearedCookieResponse("Unusual activity detected, please login again.");
         }
 
@@ -155,6 +204,22 @@ public class AuthenticationController {
     @PostMapping("/otp/resend")
     public ResponseEntity<Map<String, Object>> resendOtp(@Valid @RequestBody OtpResendRequest request) {
         Map<String, Object> result = userService.resendOtp(request);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    // Always 200 with the same generic body, whether or not the identifier
+    // matches a real account - see UserService.initiatePasswordReset.
+    @RateLimited
+    @PostMapping("/password-reset/init")
+    public ResponseEntity<Map<String, Object>> initiatePasswordReset(@Valid @RequestBody PasswordResetInitDTO request) {
+        Map<String, Object> result = userService.initiatePasswordReset(request);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    @RateLimited
+    @PostMapping("/password-reset/confirm")
+    public ResponseEntity<Map<String, Object>> confirmPasswordReset(@Valid @RequestBody PasswordResetConfirmDTO request) {
+        Map<String, Object> result = userService.confirmPasswordReset(request);
         return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
     }
 

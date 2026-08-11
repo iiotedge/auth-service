@@ -19,10 +19,26 @@ open, and [`TODO.md`](TODO.md) for the reasoning behind each open item.
   a tenant created (via tenant-management-service) and the user
   persisted. A failed user-save after the tenant call succeeds triggers
   a compensating rollback of the tenant.
-- **Refresh-token rotation** — opaque, server-side tokens, rotated on
-  every use, one live token per user, and IP-pinned: a refresh attempt
-  from a different IP than the one the token was issued to revokes it
-  and forces re-login.
+- **Refresh-token rotation with reuse detection** — opaque, server-side
+  tokens, one live session per user. Every token issued from one login
+  shares a `familyId`; rotating marks the old token revoked (kept, not
+  deleted, until it expires) rather than deleting it outright, and issues
+  a new token in the same family. Presenting an already-revoked token -
+  the signature of a stolen-and-replayed token - or a mismatched IP
+  revokes the *entire* family and forces a full re-login, not just the
+  one token.
+- **Password reset** — `POST /password-reset/init` always returns the
+  same generic response whether or not the identifier matches a real
+  account (no enumeration signal), and only emails/texts an OTP for a
+  real one; `POST /password-reset/confirm` verifies it (same attempt cap
+  as other OTP flows), updates the password, and revokes every existing
+  session for that user - a reset is exactly the moment a compromised
+  account's other sessions need to die.
+- **Login MFA (opt-in, OTP-based)** — `POST /mfa/enable` /
+  `POST /mfa/disable` (the latter requires re-entering the current
+  password) toggle it per account. When enabled, `/login` withholds the
+  access token after a correct password and emails/texts an OTP instead;
+  `POST /mfa/verify` completes the login once that OTP is confirmed.
 - **Account lockout** — after `account.lockout.max-attempts` (default 5)
   failed logins, the account is locked for `account.lockout.duration-minutes`
   (default 15); a correct password during the lockout window is still
@@ -89,13 +105,18 @@ All routes are under `/api/v1/auth`.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/login` | public, rate-limited | Returns `{accessToken}` + sets `refresh_token` cookie |
-| POST | `/refresh` | cookie-based | Rotates the refresh token, IP-pinned |
+| POST | `/login` | public, rate-limited | Returns `{accessToken}` + sets `refresh_token` cookie, or `{mfaRequired: true, identifier}` if MFA is enabled |
+| POST | `/mfa/verify` | public, rate-limited | Completes a login that returned `mfaRequired`; same response shape as `/login` on success |
+| POST | `/mfa/enable` | authenticated | Turns on login MFA for the caller's own account |
+| POST | `/mfa/disable` | authenticated | Turns it off - requires `currentPassword` in the body |
+| POST | `/refresh` | cookie-based | Rotates the refresh token; revokes the whole token family on reuse or IP mismatch |
 | POST | `/logout` | cookie-based | Revokes the refresh token |
 | GET | `/validate` | Bearer token | Token introspection - returns `X-User-Id`/`X-Tenant-Id` headers |
 | POST | `/register` | public, rate-limited | Starts OTP verification, nothing persisted yet |
 | POST | `/register/verify` | public, rate-limited | Creates the tenant + user on a correct OTP |
 | POST | `/otp/resend` | public, rate-limited | Capped at `otp.resend.max.per.hour` |
+| POST | `/password-reset/init` | public, rate-limited | Always the same generic response - no enumeration signal |
+| POST | `/password-reset/confirm` | public, rate-limited | Resets the password and revokes every existing session |
 | POST | `/users` | `ROLE_ADMIN`/`ROLE_SUPER_ADMIN` | Creates a user in the caller's own tenant |
 | POST | `/tenants/{tenantId}/users` | `ROLE_SUPER_ADMIN` | Creates a user in an arbitrary tenant |
 | GET | `/tenants/{tenantId}/users-list` | authenticated | Own tenant only, unless `ROLE_SUPER_ADMIN` |
@@ -132,20 +153,28 @@ in the response body with the same value mirrored as the HTTP status.
 | `app.cleanup.batch-size` | 500 | Rows deleted per batch in the sweep (capped at 20 batches/run) |
 | `eureka.client.service-url.defaultZone` | profile-specific | Dev's fallback includes local basic-auth creds for convenience; prod has none - see `application-{dev,prod}.yml` |
 
+OTP-backed flows (registration, password reset, login MFA) all share the
+same `otp.max.attempts` guess cap; there's no separate property per flow.
+
 ## Known limitations
 
-See [`TODO.md`](TODO.md) for the full list with reasoning. The two worth
-knowing about before relying on this service in a new way:
+See [`TODO.md`](TODO.md) for the full list with reasoning. Worth knowing
+before relying on this service in a new way:
 
-- **Refresh-token reuse detection is single-token-per-user, not
-  family/generation tracking.** Rotation deletes-and-replaces the one
-  live row per user; a stolen-then-used token just makes the legitimate
-  user's next refresh fail with "not found" rather than raising an
-  explicit "reuse detected, revoke everything" alarm. IP pinning is the
-  actual first line of defense here.
-- **No password-reset flow and no MFA on login** - self-registration and
-  admin-created users exist; OTP exists only for registration
-  verification, not as a second login factor.
+- **Login MFA is OTP-based (email/SMS), not TOTP.** It reuses the same
+  `OtpStore` mechanism as registration/password-reset rather than an
+  authenticator-app/QR-code flow, which means every MFA login has a
+  dependency on notification-service being reachable. A deliberate
+  choice to reuse existing, tested infrastructure rather than add a new
+  TOTP library - revisit if that dependency becomes a real problem.
+- **The CI workflow (`.github/workflows/ci.yml`) is untested against a
+  live runner.** It reconstructs the local multi-repo layout this
+  service's build actually needs (see the workflow's own header comment)
+  and was verified by locally simulating that exact checkout layout
+  end-to-end (`BUILD SUCCESS`, all tests passing) before being added -
+  but that's not the same as a real GitHub Actions run. It also needs a
+  `PLATFORM_REPO_TOKEN` secret configured with read access to the
+  `iotmining` and `common` repos before it can run at all.
 
 ## Quality Gates & Production Readiness
 
@@ -154,7 +183,8 @@ Every `mvn verify` runs the full quality pipeline. A failure in any gate fails t
 | Gate | Tool | Threshold |
 |---|---|---|
 | Build environment | Maven Enforcer | Java ≥ 21, Maven ≥ 3.6.3, no duplicate dependencies |
-| Unit tests | JUnit 5 / Mockito / AssertJ | 157 tests, zero failures |
+| Unit tests | JUnit 5 / Mockito / AssertJ | 185 tests, zero failures |
+| CI | GitHub Actions (`.github/workflows/ci.yml`) | Runs the same `mvn verify` on every PR/push to `main` - see Known limitations below on its current setup requirements |
 | Coverage | JaCoCo | ≥ 85% instructions, ≥ 65% branches (logic classes) |
 | Static & security analysis | SpotBugs + FindSecBugs | Zero unsuppressed findings (Medium+, effort Max) |
 

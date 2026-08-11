@@ -74,6 +74,8 @@ public final class TestDataFactory {
         token.setToken(UUID.randomUUID().toString());
         token.setIpAddress(ipAddress);
         token.setExpiryDate(expiryDate);
+        token.setFamilyId(UUID.randomUUID());
+        token.setRevoked(false);
         return token;
     }
 

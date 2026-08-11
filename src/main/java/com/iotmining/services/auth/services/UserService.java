@@ -58,6 +58,7 @@ public class UserService {
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
     private final OtpStore otpStore;
+    private final RefreshTokenService refreshTokenService;
 
     @Value("${tenant.service.url}")
     private String tenantServiceUrl;
@@ -81,6 +82,11 @@ public class UserService {
     private static final String REG_KEY_FMT = "reg:prospect:%s";
     private static final String IDX_KEY_FMT = "reg:index:%s:%s"; // type:identifier -> prospectId
     private static final Duration OTP_TTL = Duration.ofMinutes(5);
+    // Longer than signup's OTP_TTL - a password-reset email/SMS is often
+    // checked later than a live registration flow the user is actively in.
+    private static final Duration PASSWORD_RESET_OTP_TTL = Duration.ofMinutes(15);
+    // Login MFA is a synchronous flow (the user is actively waiting mid-login), same window as signup.
+    private static final Duration MFA_OTP_TTL = Duration.ofMinutes(5);
 
     // ==================================================================================
     // 1. LOGIN FLOW
@@ -101,25 +107,14 @@ public class UserService {
 
             resetFailedLoginAttempts(userPrincipal.getUser());
 
+            if (Boolean.TRUE.equals(userPrincipal.getUser().getMfaEnabled())) {
+                return challengeMfa(userPrincipal.getUser());
+            }
+
             List<String> roles = userPrincipal.getAuthorities().stream()
                     .map(GrantedAuthority::getAuthority)
                     .collect(Collectors.toList());
-
-            // Generate Token
-            UserLoginDataDTO userLoginData = JwtTokenProvider.generateToken(userPrincipal, roles);
-
-            // Log Event Async
-            userLoginData.setUser(userPrincipal.getUser());
-            userLoginDataService.addUserAsyncLoginData(userLoginData);
-
-            AuthResponseDTO authResponseDTO = new AuthResponseDTO();
-            authResponseDTO.setAccessToken(userLoginData.getConfirmationToken());
-            authResponseDTO.setIsAccountActive(true);
-
-            response.put("message", "Login successful");
-            response.put("statusCode", 200);
-            response.put("data", authResponseDTO);
-            return response;
+            return buildSuccessfulLoginResponse(userPrincipal.getUser(), roles);
 
         } catch (LockedException e) {
             log.warn("Login blocked: account locked for {}", request.getUsername());
@@ -138,6 +133,110 @@ public class UserService {
             response.put("statusCode", 500);
             return response;
         }
+    }
+
+    private Map<String, Object> buildSuccessfulLoginResponse(User user, List<String> roles) {
+        Map<String, Object> response = new HashMap<>();
+
+        UserLoginDataDTO userLoginData = JwtTokenProvider.generateToken(new UserPrincipal(user), roles);
+        userLoginData.setUser(user);
+        userLoginDataService.addUserAsyncLoginData(userLoginData);
+
+        AuthResponseDTO authResponseDTO = new AuthResponseDTO();
+        authResponseDTO.setAccessToken(userLoginData.getConfirmationToken());
+        authResponseDTO.setIsAccountActive(true);
+
+        response.put("message", "Login successful");
+        response.put("statusCode", 200);
+        response.put("data", authResponseDTO);
+        return response;
+    }
+
+    /**
+     * Password already verified at this point - withholds the access token
+     * and sends an OTP instead. No "data" key in the response, which is what
+     * tells AuthenticationController.login() not to issue a refresh cookie
+     * yet; the client must complete verifyMfa() first.
+     */
+    private Map<String, Object> challengeMfa(User user) {
+        String identifier = (user.getEmail() != null && !user.getEmail().isBlank()) ? user.getEmail() : user.getUsername();
+        String otp = otpStore.generateCode();
+        otpStore.saveNew(OtpStore.PURPOSE_LOGIN_MFA, identifier, otp,
+                Map.of("userId", user.getUserId().toString()), MFA_OTP_TTL);
+
+        String channel = identifier.contains("@") ? "EMAIL" : "SMS";
+        sendOtpInternalJwt(user.getUserId().toString(), channel, identifier, otp, "Your login verification code");
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("statusCode", 200);
+        response.put("message", "MFA verification required");
+        response.put("mfaRequired", true);
+        response.put("identifier", identifier);
+        return response;
+    }
+
+    public Map<String, Object> verifyMfa(MfaVerifyRequest request) {
+        Map<String, Object> resp = new HashMap<>();
+        String identifier = request.getIdentifier().trim();
+
+        // Same enforcement shape as the other OTP flows - capped attempts
+        // before the code must be re-requested via a fresh login attempt.
+        Map<String, Object> otpRecord = otpStore.get(OtpStore.PURPOSE_LOGIN_MFA, identifier);
+        int attemptsSoFar = otpRecord == null ? 0 : ((Number) otpRecord.getOrDefault("attempts", 0)).intValue();
+        if (attemptsSoFar >= maxOtpAttempts) {
+            resp.put("statusCode", 429);
+            resp.put("message", "Too many incorrect attempts. Please log in again.");
+            return resp;
+        }
+
+        if (!otpStore.verify(OtpStore.PURPOSE_LOGIN_MFA, identifier, request.getOtp())) {
+            otpStore.incrementAttempts(OtpStore.PURPOSE_LOGIN_MFA, identifier);
+            resp.put("statusCode", 400);
+            resp.put("message", "Invalid or expired code.");
+            return resp;
+        }
+
+        Optional<User> userOpt = userRepository.findByUsernameOrEmail(identifier);
+        if (userOpt.isEmpty()) {
+            resp.put("statusCode", 400);
+            resp.put("message", "Invalid or expired code.");
+            return resp;
+        }
+        User user = userOpt.get();
+        otpStore.delete(OtpStore.PURPOSE_LOGIN_MFA, identifier);
+
+        List<String> roles = user.getRoles().stream().map(Role::getName).collect(Collectors.toList());
+        return buildSuccessfulLoginResponse(user, roles);
+    }
+
+    public Map<String, Object> enableMfa(UUID userId) {
+        Map<String, Object> resp = new HashMap<>();
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
+        user.setMfaEnabled(true);
+        userRepository.save(user);
+        resp.put("statusCode", 200);
+        resp.put("message", "Multi-factor authentication enabled.");
+        return resp;
+    }
+
+    /** Requires the current password so a hijacked-but-valid session can't silently turn MFA off. */
+    public Map<String, Object> disableMfa(UUID userId, String currentPassword) {
+        Map<String, Object> resp = new HashMap<>();
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
+
+        if (!passwordEncoder.matches(currentPassword, user.getPassword())) {
+            resp.put("statusCode", 401);
+            resp.put("message", "Incorrect password.");
+            return resp;
+        }
+
+        user.setMfaEnabled(false);
+        userRepository.save(user);
+        resp.put("statusCode", 200);
+        resp.put("message", "Multi-factor authentication disabled.");
+        return resp;
     }
 
     /**
@@ -246,7 +345,7 @@ public class UserService {
             // 2. Verify OTP - capped at maxOtpAttempts wrong guesses (otpStore
             // already tracked "attempts" but nothing previously enforced a
             // limit on it, leaving OTP guessing effectively unbounded).
-            Map<String, Object> otpRecord = otpStore.get(prospectId);
+            Map<String, Object> otpRecord = otpStore.get(OtpStore.PURPOSE_SIGNUP, prospectId);
             int attemptsSoFar = otpRecord == null ? 0 : ((Number) otpRecord.getOrDefault("attempts", 0)).intValue();
             if (attemptsSoFar >= maxOtpAttempts) {
                 resp.put("statusCode", 429);
@@ -254,8 +353,8 @@ public class UserService {
                 return resp;
             }
 
-            if (!otpStore.verify(prospectId, req.getOtp())) {
-                otpStore.incrementAttempts(prospectId);
+            if (!otpStore.verify(OtpStore.PURPOSE_SIGNUP, prospectId, req.getOtp())) {
+                otpStore.incrementAttempts(OtpStore.PURPOSE_SIGNUP, prospectId);
                 resp.put("statusCode", 400); resp.put("message", "Invalid OTP"); return resp;
             }
 
@@ -338,7 +437,7 @@ public class UserService {
             }
 
             // Cleanup Redis
-            otpStore.delete(prospectId);
+            otpStore.delete(OtpStore.PURPOSE_SIGNUP, prospectId);
             redis.delete(regKey);
             removeIdentifierIndexes(prospectId, register);
 
@@ -406,14 +505,14 @@ public class UserService {
             }
 
             // Rate Limit
-            try { otpStore.ensureResendBudget(prospectId, maxOtpResendsPerHour); }
+            try { otpStore.ensureResendBudget(OtpStore.PURPOSE_SIGNUP, prospectId, maxOtpResendsPerHour); }
             catch (RuntimeException e) { resp.put("statusCode", 429); resp.put("message", "Too many attempts"); return resp; }
 
             // New OTP
             final String newOtp = otpStore.generateCode();
             Map<String, Object> extra = Map.of("prospectId", prospectId, "channel", outChannel, "createdAt", System.currentTimeMillis());
 
-            otpStore.replaceOtp(prospectId, newOtp, extra, OTP_TTL);
+            otpStore.replaceOtp(OtpStore.PURPOSE_SIGNUP, prospectId, newOtp, extra, OTP_TTL);
             redis.opsForValue().set(regKey, regJson, OTP_TTL); // Refresh TTL
 
             sendOtpInternalJwt(prospectId, outChannel, outIdentifier, newOtp);
@@ -501,6 +600,82 @@ public class UserService {
     }
 
     // ==================================================================================
+    // 7. PASSWORD RESET
+    // ==================================================================================
+
+    /**
+     * Always returns the same generic response whether or not the identifier
+     * matches a real account - a distinguishable response here would let a
+     * caller enumerate valid usernames/emails by probing this endpoint.
+     */
+    public Map<String, Object> initiatePasswordReset(PasswordResetInitDTO request) {
+        Map<String, Object> resp = new HashMap<>();
+        resp.put("statusCode", 200);
+        resp.put("message", "If an account exists for that identifier, a password reset code has been sent.");
+
+        String identifier = request.getIdentifier().trim();
+        Optional<User> userOpt = userRepository.findByUsernameOrEmail(identifier);
+        if (userOpt.isEmpty()) {
+            log.info("Password reset requested for an identifier with no matching account");
+            return resp;
+        }
+        User user = userOpt.get();
+
+        String otp = otpStore.generateCode();
+        otpStore.saveNew(OtpStore.PURPOSE_PASSWORD_RESET, identifier, otp,
+                Map.of("userId", user.getUserId().toString()), PASSWORD_RESET_OTP_TTL);
+
+        String channel = identifier.contains("@") ? "EMAIL" : "SMS";
+        sendOtpInternalJwt(user.getUserId().toString(), channel, identifier, otp, "Reset your password");
+
+        return resp;
+    }
+
+    public Map<String, Object> confirmPasswordReset(PasswordResetConfirmDTO request) {
+        Map<String, Object> resp = new HashMap<>();
+        String identifier = request.getIdentifier().trim();
+
+        // Same enforcement shape as registration's OTP verify - capped at
+        // maxOtpAttempts wrong guesses before the code must be re-requested.
+        Map<String, Object> otpRecord = otpStore.get(OtpStore.PURPOSE_PASSWORD_RESET, identifier);
+        int attemptsSoFar = otpRecord == null ? 0 : ((Number) otpRecord.getOrDefault("attempts", 0)).intValue();
+        if (attemptsSoFar >= maxOtpAttempts) {
+            resp.put("statusCode", 429);
+            resp.put("message", "Too many incorrect attempts. Please request a new code.");
+            return resp;
+        }
+
+        if (!otpStore.verify(OtpStore.PURPOSE_PASSWORD_RESET, identifier, request.getOtp())) {
+            otpStore.incrementAttempts(OtpStore.PURPOSE_PASSWORD_RESET, identifier);
+            resp.put("statusCode", 400);
+            resp.put("message", "Invalid or expired code.");
+            return resp;
+        }
+
+        Optional<User> userOpt = userRepository.findByUsernameOrEmail(identifier);
+        if (userOpt.isEmpty()) {
+            // OTP verified but the account is gone (deleted mid-flow) - stay generic.
+            resp.put("statusCode", 400);
+            resp.put("message", "Invalid or expired code.");
+            return resp;
+        }
+        User user = userOpt.get();
+
+        user.setPassword(passwordEncoder.encode(request.getNewPassword()));
+        userRepository.save(user);
+        otpStore.delete(OtpStore.PURPOSE_PASSWORD_RESET, identifier);
+
+        // A password reset means any previously-issued session (and refresh
+        // token) should stop working - if the reset was prompted by a
+        // compromised account, this is what actually locks the attacker out.
+        refreshTokenService.revokeAllForUser(user);
+
+        resp.put("statusCode", 200);
+        resp.put("message", "Password has been reset. Please log in again.");
+        return resp;
+    }
+
+    // ==================================================================================
     // HELPERS
     // ==================================================================================
 
@@ -521,6 +696,10 @@ public class UserService {
     }
 
     private boolean sendOtpInternalJwt(String prospectId, String channel, String identifier, String otp) {
+        return sendOtpInternalJwt(prospectId, channel, identifier, otp, "Verify your Account");
+    }
+
+    private boolean sendOtpInternalJwt(String prospectId, String channel, String identifier, String otp, String emailSubject) {
         try {
             String token = JwtTokenProvider.issueInternalToken("auth-service", prospectId, 10);
             String bearer = "Bearer " + token;
@@ -531,7 +710,7 @@ public class UserService {
                 payloadData.put("content", "Your OTP is " + otp);
             } else {
                 payloadData.put("to", identifier);
-                payloadData.put("subject", "Verify your Account");
+                payloadData.put("subject", emailSubject);
                 payloadData.put("body", "<h1>" + otp + "</h1>");
                 payloadData.put("isHtml", true);
             }
@@ -573,7 +752,7 @@ public class UserService {
     // Redis Helpers
     private void saveOtpAndPending(String prospectId, String otp, RegisterDTO request) throws Exception {
         Map<String, Object> extra = Map.of("prospectId", prospectId);
-        otpStore.saveNew(prospectId, otp, extra, OTP_TTL);
+        otpStore.saveNew(OtpStore.PURPOSE_SIGNUP, prospectId, otp, extra, OTP_TTL);
         redis.opsForValue().set(REG_KEY_FMT.formatted(prospectId), objectMapper.writeValueAsString(request), OTP_TTL);
         if (request.getEmail() != null) redis.opsForValue().set(indexKey("EMAIL", request.getEmail()), prospectId, OTP_TTL);
         if (request.getPhoneNumber() != null) redis.opsForValue().set(indexKey("SMS", request.getPhoneNumber()), prospectId, OTP_TTL);
