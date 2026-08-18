@@ -1,6 +1,7 @@
 package com.iotmining.services.auth.controller;
 
 import com.iotmining.services.auth.dto.AuthResponseDTO;
+import com.iotmining.services.auth.dto.ChangePasswordDTO;
 import com.iotmining.services.auth.dto.DisableMfaRequest;
 import com.iotmining.services.auth.dto.MfaVerifyRequest;
 import com.iotmining.services.auth.dto.OtpResendRequest;
@@ -10,6 +11,7 @@ import com.iotmining.services.auth.dto.PasswordResetInitDTO;
 import com.iotmining.services.auth.dto.RegisterDTO;
 import com.iotmining.services.auth.dto.UserCreateDTO;
 import com.iotmining.services.auth.dto.UserCredentialDTO;
+import com.iotmining.services.auth.dto.UserProfileDTO;
 import com.iotmining.services.auth.dto.UserSummaryDTO;
 import com.iotmining.services.auth.annotation.RateLimited;
 import com.iotmining.services.auth.entity.RefreshToken;
@@ -221,6 +223,25 @@ public class AuthenticationController {
     public ResponseEntity<Map<String, Object>> confirmPasswordReset(@Valid @RequestBody PasswordResetConfirmDTO request) {
         Map<String, Object> result = userService.confirmPasswordReset(request);
         return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    // For an already-logged-in user rotating their own password - distinct from
+    // password-reset above, which is for a user who's forgotten it. Rate-limited
+    // like every other password-related endpoint: currentPassword is itself a
+    // guessable credential.
+    @RateLimited
+    @PostMapping("/change-password")
+    public ResponseEntity<Map<String, Object>> changePassword(@Valid @RequestBody ChangePasswordDTO request,
+                                                                 Authentication authentication) {
+        UUID userId = ((UserPrincipal) authentication.getPrincipal()).getUser().getUserId();
+        Map<String, Object> result = userService.changePassword(userId, request);
+        return ResponseEntity.status((Integer) result.get("statusCode")).body(result);
+    }
+
+    @GetMapping("/me")
+    public ResponseEntity<UserProfileDTO> getMyProfile(Authentication authentication) {
+        UUID userId = ((UserPrincipal) authentication.getPrincipal()).getUser().getUserId();
+        return ResponseEntity.ok(userService.getUserProfile(userId));
     }
 
     @PostMapping("/users")

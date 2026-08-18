@@ -530,6 +530,66 @@ class AuthenticationControllerTest {
     }
 
     // ==============================================================================
+    // CHANGE PASSWORD / OWN PROFILE
+    // ==============================================================================
+    @Nested
+    @DisplayName("change password / my profile")
+    class ChangePasswordAndProfile {
+
+        @Test
+        @DisplayName("change-password passes the service status code through")
+        void changePasswordPassesThroughStatus() throws Exception {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("statusCode", 200);
+            ok.put("message", "Password changed successfully. Please log in again on other devices.");
+            when(userService.changePassword(eq(user.getUserId()), any())).thenReturn(ok);
+
+            mockMvc.perform(post("/api/v1/auth/change-password")
+                            .principal(authenticationFor(user))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"currentPassword\":\"OldStr0ng@Pass\",\"newPassword\":\"NewStr0ng@Pass\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.message").value(containsString("Please log in again")));
+        }
+
+        @Test
+        @DisplayName("change-password rejects a weak new password before reaching the service")
+        void changePasswordRejectsWeakPassword() throws Exception {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+
+            mockMvc.perform(post("/api/v1/auth/change-password")
+                            .principal(authenticationFor(user))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"currentPassword\":\"OldStr0ng@Pass\",\"newPassword\":\"weak\"}"))
+                    .andExpect(status().isBadRequest());
+
+            verify(userService, never()).changePassword(any(), any());
+        }
+
+        @Test
+        @DisplayName("GET /me returns the authenticated caller's own profile")
+        void getMyProfile() throws Exception {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            com.iotmining.services.auth.dto.UserProfileDTO profile = new com.iotmining.services.auth.dto.UserProfileDTO();
+            profile.setUserId(user.getUserId());
+            profile.setUsername("john.doe");
+            profile.setEmail(user.getEmail());
+            when(userService.getUserProfile(user.getUserId())).thenReturn(profile);
+
+            mockMvc.perform(get("/api/v1/auth/me")
+                            .principal(authenticationFor(user)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.username").value("john.doe"));
+        }
+
+        private Authentication authenticationFor(User user) {
+            UserPrincipal principal = new UserPrincipal(user);
+            return new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
+        }
+    }
+
+    // ==============================================================================
     // MFA
     // ==============================================================================
     @Nested

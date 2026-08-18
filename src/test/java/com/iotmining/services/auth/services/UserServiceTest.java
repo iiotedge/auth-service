@@ -821,6 +821,93 @@ class UserServiceTest {
         }
     }
 
+    @Nested
+    @DisplayName("changePassword")
+    class ChangePassword {
+
+        @Test
+        @DisplayName("changes the password and revokes every existing session, given the correct current password")
+        void changesPasswordAndRevokesSessions() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
+            when(passwordEncoder.matches("OldStr0ng@Pass", user.getPassword())).thenReturn(true);
+            when(passwordEncoder.encode("NewStr0ng@Pass")).thenReturn("encoded-new-hash");
+
+            Map<String, Object> response = userService.changePassword(user.getUserId(),
+                    changePassword("OldStr0ng@Pass", "NewStr0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(200);
+            assertThat(user.getPassword()).isEqualTo("encoded-new-hash");
+            verify(userRepository).save(user);
+            verify(refreshTokenService).revokeAllForUser(user);
+        }
+
+        @Test
+        @DisplayName("rejects an incorrect current password without touching the account")
+        void rejectsWrongCurrentPassword() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
+            when(passwordEncoder.matches("WrongPass@1", user.getPassword())).thenReturn(false);
+
+            Map<String, Object> response = userService.changePassword(user.getUserId(),
+                    changePassword("WrongPass@1", "NewStr0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(400);
+            verify(userRepository, never()).save(any());
+            verify(refreshTokenService, never()).revokeAllForUser(any());
+        }
+
+        @Test
+        @DisplayName("throws if the authenticated user id no longer resolves to a real account")
+        void throwsWhenUserMissing() {
+            UUID missingUserId = UUID.randomUUID();
+            when(userRepository.findById(missingUserId)).thenReturn(Optional.empty());
+
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    com.iotmining.services.auth.exceptions.UserMessageException.class,
+                    () -> userService.changePassword(missingUserId, changePassword("OldStr0ng@Pass", "NewStr0ng@Pass")));
+        }
+    }
+
+    @Nested
+    @DisplayName("getUserProfile")
+    class GetUserProfile {
+
+        @Test
+        @DisplayName("maps the authenticated user's own account into a profile DTO")
+        void returnsOwnProfile() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            when(userRepository.findById(user.getUserId())).thenReturn(Optional.of(user));
+
+            com.iotmining.services.auth.dto.UserProfileDTO profile = userService.getUserProfile(user.getUserId());
+
+            assertThat(profile.getUserId()).isEqualTo(user.getUserId());
+            assertThat(profile.getTenantId()).isEqualTo(user.getTenantId());
+            assertThat(profile.getUsername()).isEqualTo("john.doe");
+            assertThat(profile.getEmail()).isEqualTo(user.getEmail());
+            assertThat(profile.getRoles()).containsExactly("ROLE_USER");
+            assertThat(profile.isMfaEnabled()).isFalse();
+        }
+
+        @Test
+        @DisplayName("throws if the authenticated user id no longer resolves to a real account")
+        void throwsWhenUserMissing() {
+            UUID missingUserId = UUID.randomUUID();
+            when(userRepository.findById(missingUserId)).thenReturn(Optional.empty());
+
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    com.iotmining.services.auth.exceptions.UserMessageException.class,
+                    () -> userService.getUserProfile(missingUserId));
+        }
+    }
+
+    private com.iotmining.services.auth.dto.ChangePasswordDTO changePassword(String currentPassword, String newPassword) {
+        com.iotmining.services.auth.dto.ChangePasswordDTO dto = new com.iotmining.services.auth.dto.ChangePasswordDTO();
+        dto.setCurrentPassword(currentPassword);
+        dto.setNewPassword(newPassword);
+        return dto;
+    }
+
     private com.iotmining.services.auth.dto.PasswordResetInitDTO resetInit(String identifier) {
         com.iotmining.services.auth.dto.PasswordResetInitDTO dto = new com.iotmining.services.auth.dto.PasswordResetInitDTO();
         dto.setIdentifier(identifier);

@@ -15,6 +15,11 @@ What's actually verified vs. still open, as of this hardening pass. See
       already-rotated-away token or an IP mismatch revokes the whole
       family, not just the one token
 - [x] Password-reset flow, enumeration-safe, revokes all sessions on reset
+- [x] Change-password for an already-authenticated user (`/change-password`,
+      distinct from the forgot-password reset flow above) - verifies the
+      current password, same session-revocation hygiene as reset
+- [x] `GET /me` - authenticated caller can fetch their own profile without
+      needing admin-panel access to another endpoint
 - [x] Login MFA, opt-in per account (OTP-based - see `TODO.md` re: TOTP)
 - [x] RBAC enforced via Spring Security method security
       (`@PreAuthorize`/`@RolesAllowed`), not just controller-level checks

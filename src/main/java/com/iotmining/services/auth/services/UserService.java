@@ -675,6 +675,49 @@ public class UserService {
         return resp;
     }
 
+    // For an already-authenticated user rotating their own password (as opposed
+    // to confirmPasswordReset's forgot-password flow, which is OTP-verified
+    // instead of current-password-verified). Same session-revocation hygiene as
+    // reset: a password change is exactly the moment a stolen session token
+    // should stop working everywhere else.
+    @Transactional
+    public Map<String, Object> changePassword(UUID userId, ChangePasswordDTO request) {
+        Map<String, Object> resp = new HashMap<>();
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new UserMessageException("User not found."));
+
+        if (!passwordEncoder.matches(request.getCurrentPassword(), user.getPassword())) {
+            resp.put("statusCode", 400);
+            resp.put("message", "Current password is incorrect.");
+            return resp;
+        }
+
+        user.setPassword(passwordEncoder.encode(request.getNewPassword()));
+        userRepository.save(user);
+        refreshTokenService.revokeAllForUser(user);
+
+        resp.put("statusCode", 200);
+        resp.put("message", "Password changed successfully. Please log in again on other devices.");
+        return resp;
+    }
+
+    public UserProfileDTO getUserProfile(UUID userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new UserMessageException("User not found."));
+
+        UserProfileDTO dto = new UserProfileDTO();
+        dto.setUserId(user.getUserId());
+        dto.setTenantId(user.getTenantId());
+        dto.setUsername(user.getUsername());
+        dto.setEmail(user.getEmail());
+        dto.setFirstName(user.getFirstName());
+        dto.setLastName(user.getLastName());
+        dto.setPhoneNumber(user.getPhoneNumber());
+        dto.setRoles(user.getRoles().stream().map(Role::getName).collect(Collectors.toList()));
+        dto.setMfaEnabled(Boolean.TRUE.equals(user.getMfaEnabled()));
+        return dto;
+    }
+
     // ==================================================================================
     // HELPERS
     // ==================================================================================

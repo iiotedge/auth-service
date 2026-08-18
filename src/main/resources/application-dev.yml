@@ -13,7 +13,7 @@ spring:
       max-lifetime: 1800000
   jpa:
     hibernate:
-#      ddl-auto: create-drop
+    #  ddl-auto: create-drop
       ddl-auto: update
     database: postgresql
 #    database-platform: org.hibernate.dialect.PostgreSQLDialect

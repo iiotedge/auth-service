@@ -7,6 +7,15 @@ decision only the team can make.
 
 ## Resolved (kept here briefly for context, not action items)
 
+- ~~Change-password (logged-in user) and `GET /me`~~ — done. Two standard
+  auth-service features that were simply never built: an authenticated
+  user could only rotate their password via the forgot-password reset
+  flow (no current-password-verified change), and had no way to fetch
+  their own profile without going through the admin panel's user lookup
+  (admin-only). Self-service session listing/revocation ("log out this
+  other device") is still open - a bigger feature, needs a way to
+  identify individual sessions beyond the existing refresh-token family
+  model.
 - ~~Refresh-token reuse detection~~ — done. Token rotation now uses a
   `familyId` + `revoked` flag (not delete-and-replace); presenting an
   already-revoked token or a mismatched IP revokes the whole family.
@@ -27,6 +36,13 @@ decision only the team can make.
 
 ## Architecture
 
+- [ ] **Self-service session management** - a user can revoke every
+      session at once (implicitly, via password reset/change) but can't
+      see or selectively revoke individual active sessions/devices
+      ("log out this one other device, keep the rest"). Needs each
+      refresh token to carry enough identity (device/user-agent label,
+      last-used timestamp) to be meaningfully listed, not just a bare
+      family id - a real feature, not a quick addition.
 - [ ] **Publish the parent POM chain + `common` modules to GitHub
       Packages**, matching tenant-management-service's already-adopted
       pattern. This is the actual fix for CI/standalone-buildability -
