@@ -146,17 +146,16 @@ class UserServiceTest {
         }
 
         @Test
-        @DisplayName("rejects a disabled account (currently surfaced as 500)")
+        @DisplayName("rejects a disabled account with its specific message")
         void loginDisabledAccount() {
-            // Documents current behavior: the disabled-account UserMessageException is
-            // swallowed by the generic catch block and mapped to 500 instead of 401/403.
             User user = TestDataFactory.user("john.doe", "ROLE_USER");
             user.setIsAccountActive(false);
             stubAuthenticatedPrincipal(user);
 
             Map<String, Object> response = userService.verify(new UserCredentialDTO("john.doe", "Str0ng@Pass"));
 
-            assertThat(response.get("statusCode")).isEqualTo(500);
+            assertThat(response.get("statusCode")).isEqualTo(400);
+            assertThat(response.get("message")).isEqualTo("Account is disabled. Please contact support.");
             assertThat(response).doesNotContainKey("data");
             verify(userLoginDataService, never()).addUserAsyncLoginData(any());
         }
@@ -251,7 +250,7 @@ class UserServiceTest {
         }
 
         @Test
-        @DisplayName("cleans up pending state and returns 500 when OTP delivery fails everywhere")
+        @DisplayName("cleans up pending state and returns 400 when OTP delivery fails everywhere")
         void cleansUpWhenDeliveryFails() {
             RegisterDTO request = TestDataFactory.validRegistration();
             when(userRepository.existsByUsername(request.getUsername())).thenReturn(false);
@@ -261,8 +260,8 @@ class UserServiceTest {
 
             Map<String, Object> response = userService.registerInit(request);
 
-            assertThat(response.get("statusCode")).isEqualTo(500);
-            assertThat((String) response.get("message")).contains("Registration failed");
+            assertThat(response.get("statusCode")).isEqualTo(400);
+            assertThat((String) response.get("message")).contains("Failed to deliver OTP");
             verify(redis).delete(contains("reg:prospect:"));
         }
     }
@@ -459,6 +458,20 @@ class UserServiceTest {
             verify(valueOps).set(eq(regKey), anyString(), any());
         }
 
+        @Test
+        @DisplayName("returns 502 and drops the OTP when delivery fails")
+        void surfacesDeliveryFailure() throws Exception {
+            stubPendingRegistration();
+            when(otpStore.generateCode()).thenReturn("654321");
+            stubNotificationDelivery(false);
+
+            Map<String, Object> response = userService.resendOtp(resendRequest());
+
+            assertThat(response.get("statusCode")).isEqualTo(502);
+            assertThat((String) response.get("message")).contains("Failed to deliver OTP");
+            verify(otpStore).delete(OtpStore.PURPOSE_SIGNUP, prospectId);
+        }
+
         private OtpResendRequest resendRequest() {
             OtpResendRequest request = new OtpResendRequest();
             request.setIdentifier("john.doe@example.com");
@@ -608,6 +621,22 @@ class UserServiceTest {
             assertThat(response.get("identifier")).isEqualTo(user.getEmail());
             verify(otpStore).saveNew(eq(OtpStore.PURPOSE_LOGIN_MFA), eq(user.getEmail()), eq("123456"), anyMap(), any());
             verify(userLoginDataService, never()).addUserAsyncLoginData(any());
+        }
+
+        @Test
+        @DisplayName("login surfaces a clear error and drops the OTP when delivery fails")
+        void loginMfaChallengeSurfacesDeliveryFailure() {
+            User user = TestDataFactory.user("john.doe", "ROLE_USER");
+            user.setMfaEnabled(true);
+            stubAuthenticatedPrincipal(user);
+            when(otpStore.generateCode()).thenReturn("123456");
+            stubNotificationDelivery(false);
+
+            Map<String, Object> response = userService.verify(new UserCredentialDTO("john.doe", "Str0ng@Pass"));
+
+            assertThat(response.get("statusCode")).isEqualTo(400);
+            assertThat((String) response.get("message")).contains("Failed to deliver verification code");
+            verify(otpStore).delete(eq(OtpStore.PURPOSE_LOGIN_MFA), eq(user.getEmail()));
         }
 
         @Test

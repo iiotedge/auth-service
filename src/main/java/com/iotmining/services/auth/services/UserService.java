@@ -127,6 +127,13 @@ public class UserService {
             response.put("message", "Invalid username or password");
             response.put("statusCode", 401);
             return response;
+        } catch (UserMessageException e) {
+            // Without this, both this (disabled account) and the MFA OTP
+            // delivery-failure check in challengeMfa() fell through to the
+            // generic catch below and lost their specific message.
+            response.put("message", e.getUserMessage());
+            response.put("statusCode", 400);
+            return response;
         } catch (Exception e) {
             log.error("Login unexpected error", e);
             response.put("message", "Internal Server Error");
@@ -165,7 +172,11 @@ public class UserService {
                 Map.of("userId", user.getUserId().toString()), MFA_OTP_TTL);
 
         String channel = identifier.contains("@") ? "EMAIL" : "SMS";
-        sendOtpInternalJwt(user.getUserId().toString(), channel, identifier, otp, "Your login verification code");
+        boolean delivered = sendOtpInternalJwt(user.getUserId().toString(), channel, identifier, otp, "Your login verification code");
+        if (!delivered) {
+            otpStore.delete(OtpStore.PURPOSE_LOGIN_MFA, identifier);
+            throw new UserMessageException("Failed to deliver verification code via " + channel + ". Please try again.");
+        }
 
         Map<String, Object> response = new HashMap<>();
         response.put("statusCode", 200);
@@ -301,7 +312,7 @@ public class UserService {
 
             if (!delivered) {
                 redis.delete(REG_KEY_FMT.formatted(pId)); // Cleanup
-                throw new RuntimeException("Failed to deliver OTP via " + resolvedChannel);
+                throw new UserMessageException("Failed to deliver OTP via " + resolvedChannel + ". Please try again.");
             }
 
             resp.put("statusCode", 202);
@@ -515,7 +526,13 @@ public class UserService {
             otpStore.replaceOtp(OtpStore.PURPOSE_SIGNUP, prospectId, newOtp, extra, OTP_TTL);
             redis.opsForValue().set(regKey, regJson, OTP_TTL); // Refresh TTL
 
-            sendOtpInternalJwt(prospectId, outChannel, outIdentifier, newOtp);
+            boolean delivered = sendOtpInternalJwt(prospectId, outChannel, outIdentifier, newOtp);
+            if (!delivered) {
+                otpStore.delete(OtpStore.PURPOSE_SIGNUP, prospectId);
+                resp.put("statusCode", 502);
+                resp.put("message", "Failed to deliver OTP via " + outChannel + ". Please try again.");
+                return resp;
+            }
 
             resp.put("statusCode", 202);
             resp.put("message", "OTP resent");
@@ -625,6 +642,11 @@ public class UserService {
         otpStore.saveNew(OtpStore.PURPOSE_PASSWORD_RESET, identifier, otp,
                 Map.of("userId", user.getUserId().toString()), PASSWORD_RESET_OTP_TTL);
 
+        // Return value intentionally ignored (unlike the other 3 OTP call sites):
+        // surfacing a delivery failure here would only ever happen for an
+        // identifier that DOES match an account, which is itself the exact
+        // enumeration signal this method's generic response is designed to
+        // avoid. A failed send is still logged inside sendOtpInternalJwt.
         String channel = identifier.contains("@") ? "EMAIL" : "SMS";
         sendOtpInternalJwt(user.getUserId().toString(), channel, identifier, otp, "Reset your password");
 

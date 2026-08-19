@@ -13,7 +13,7 @@ public interface NotificationClient {
 
     @PostMapping("/api/notifications/internal/send")
     ResponseEntity<BaseResponse<NotificationResponse>> sendInternalPreReg(
-            @RequestHeader("X-Internal-Token") String internalToken,
+            @RequestHeader("Authorization") String bearerToken,
             @RequestHeader("X-Prospect-ID") String prospectId,
             @RequestBody Map<String, Object> body
     );

@@ -74,7 +74,11 @@ tenant:
 
 notification:
   service:
-    url: http://localhost:8087
+    # Was hardcoded to 8087, which nothing actually listens on -
+    # notification-service's real dev port is 8059 (see its own
+    # application.yml). Every OTP send silently failed against a
+    # connection-refused error caught and swallowed by sendOtpInternalJwt.
+    url: ${NOTIFICATION_SERVICE_URL:http://localhost:8059}
 
 otp:
   ttl:
