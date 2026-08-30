@@ -54,10 +54,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Was "iiotedge/iotmining" - the repo itself was renamed to
+      # "iiotedge/iiotedge" (confirmed via the GitHub API; GitHub's
+      # redirect usually papers over a stale name like this, but pinning
+      # the current one is more correct than relying on that
+      # indefinitely). Both this repo and iiotedge/common below are
+      # genuinely public, so the token isn't actually required for the
+      # checkout itself - kept it anyway since PLATFORM_REPO_TOKEN has to
+      # exist regardless for the GitHub Packages Maven resolution further
+      # down (a hard platform requirement: GitHub Packages' Maven/npm
+      # registry always needs a credential to read, even for public
+      # packages - unlike ghcr.io container images).
       - name: Checkout iotmining (parent pom for common/data, common/base, common/audit)
         uses: actions/checkout@v4
         with:
-          repository: iiotedge/iotmining
+          repository: iiotedge/iiotedge
           token: ${{ secrets.PLATFORM_REPO_TOKEN }}
           path: iotmining
 
