@@ -22,8 +22,8 @@ decision only the team can make.
 - ~~Password-reset flow~~ — done (`/password-reset/init` + `/confirm`),
   enumeration-safe, revokes all sessions on success.
 - ~~MFA on login~~ — done, but OTP-based rather than TOTP (see below).
-- ~~No CI pipeline~~ — `.github/workflows/ci.yml` added, but see its own
-  header comment and the entry below - it's a stopgap, not the real fix.
+- ~~No CI pipeline~~ — `.github/workflows/ci.yml` calls the shared iiotedge
+  pipeline (no secret needed).
 - ~~Deprecated Spring Boot 3.4.2 properties in all three profiles~~ —
   `spring.redis.*` -> `spring.data.redis.*` (including `RedisConfig.java`'s
   `@Value` lookups and the now-also-deprecated boolean `ssl` ->
@@ -102,15 +102,10 @@ decision only the team can make.
 
 ## Operational
 
-- [ ] `.github/workflows/ci.yml` needs a `PLATFORM_REPO_TOKEN` repo
-      secret (read access to `IotMining/iotmining` and `IotMining/common`)
-      added under Settings before it can run at all - and its first real
-      run should be watched closely, since it was only verified via a
-      local simulation of the checkout layout, not a live runner.
 - [ ] Automate the OWASP dependency-check CVE scan (the `security-audit`
       Maven profile exists, needs an NVD API key and a few minutes - fine
-      for CI, not something to run on every local build). Natural to add
-      as a second job in `ci.yml` once the first job is confirmed working.
+      for CI, not something to run on every local build). Natural home:
+      the shared pipeline in platform-build, as a scheduled job.
 - [ ] Real DB migrations (Flyway/Liquibase) instead of
       `spring.jpa.hibernate.ddl-auto=update`. Matches the rest of this
       platform's current convention, so not unique to this service, but
