@@ -13,6 +13,13 @@ spring:
       mode: always
   jpa:
     defer-datasource-initialization: true
+  # Spring Boot 4 serializes REST bodies with Jackson 3, whose defaults differ from the
+  # Jackson 2 setup Boot 3 used (alphabetical property order, enums written and read via
+  # toString(), null into primitives and trailing tokens rejected, java.util.Date with
+  # "Z" instead of "+00:00"). This keeps the JSON the UI and other services see the
+  # same as on Boot 3.
+  jackson:
+    use-jackson2-defaults: true
 server:
   port: 8051
 
