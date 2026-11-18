@@ -10,7 +10,7 @@
     <parent>
         <groupId>com.iiotedge.build</groupId>
         <artifactId>iiotedge-parent</artifactId>
-        <version>2025.08.18</version>
+        <version>2026.11.18</version>
         <relativePath/>
     </parent>
 
@@ -38,7 +38,7 @@
             <dependency>
                 <groupId>com.iiotedge.build</groupId>
                 <artifactId>iiotedge-bom</artifactId>
-                <version>2025.08.18</version>
+                <version>2026.11.18</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -49,9 +49,9 @@
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <springdoc.version>2.8.5</springdoc.version>
+        <!-- springdoc 3.0.x is the line built on Spring Boot 4.0 (2.x targets Boot 3). -->
+        <springdoc.version>3.0.3</springdoc.version>
         <jjwt.version>0.12.6</jjwt.version>
-        <shedlock.version>5.16.0</shedlock.version>
 
         <!-- Quality & security tooling -->
         <jacoco.version>0.8.12</jacoco.version>
@@ -77,7 +77,7 @@
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
             <exclusions>
                 <exclusion>
                     <groupId>org.springframework.boot</groupId>
@@ -103,15 +103,14 @@
              instance. Uses a lock row in the existing Postgres DB via
              JdbcTemplate (already on the classpath via spring-boot-starter-data-jpa),
              no new infrastructure. See SchedulerLockConfig + schema.sql. -->
+        <!-- Version from iiotedge-bom (ShedLock 7.x, the Spring Framework 7 line). -->
         <dependency>
             <groupId>net.javacrumbs.shedlock</groupId>
             <artifactId>shedlock-spring</artifactId>
-            <version>${shedlock.version}</version>
         </dependency>
         <dependency>
             <groupId>net.javacrumbs.shedlock</groupId>
             <artifactId>shedlock-provider-jdbc-template</artifactId>
-            <version>${shedlock.version}</version>
         </dependency>
 
         <dependency>
@@ -146,7 +145,7 @@
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web-services</artifactId>
+            <artifactId>spring-boot-starter-webservices</artifactId>
         </dependency>
 
         <dependency>
@@ -170,7 +169,7 @@
         <dependency>
             <groupId>com.iiotedge</groupId>
             <artifactId>iiotedge-audit-starter</artifactId>
-            <version>1.0.0</version>
+            <version>2.0.0</version>
         </dependency>
 
         <dependency>
@@ -179,9 +178,19 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Spring Boot 4 moved the Kafka auto-configuration into spring-boot-kafka;
+             the bare kafka-clients library no longer brings it. The starter keeps
+             spring.kafka.* and the KafkaTemplate the audit starter publishes with
+             auto-configured as on Boot 3. -->
         <dependency>
-            <groupId>org.apache.kafka</groupId>
-            <artifactId>kafka-clients</artifactId>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
@@ -206,6 +215,15 @@
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
+        <!-- Spring Boot 4 only auto-configures a Jackson 3 JsonMapper. UserService
+             injects Jackson 2's ObjectMapper (pending-registration JSON in Redis,
+             Feign request maps); this module restores the Boot-configured Jackson 2
+             ObjectMapper bean with the same defaults as Boot 3, so payloads written
+             before and after the upgrade stay compatible. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-jackson2</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.springdoc</groupId>
@@ -216,12 +234,12 @@
         <dependency>
             <groupId>com.iotmining.common</groupId>
             <artifactId>data</artifactId>
-            <version>0.0.1-SNAPSHOT</version>
+            <version>0.0.2-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>com.iotmining.common</groupId>
             <artifactId>base</artifactId>
-            <version>0.0.1-SNAPSHOT</version>
+            <version>0.0.2-SNAPSHOT</version>
         </dependency>
 
         <dependency>
