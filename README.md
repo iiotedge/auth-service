@@ -167,14 +167,11 @@ before relying on this service in a new way:
   dependency on notification-service being reachable. A deliberate
   choice to reuse existing, tested infrastructure rather than add a new
   TOTP library - revisit if that dependency becomes a real problem.
-- **The CI workflow (`.github/workflows/ci.yml`) is untested against a
-  live runner.** It reconstructs the local multi-repo layout this
-  service's build actually needs (see the workflow's own header comment)
-  and was verified by locally simulating that exact checkout layout
-  end-to-end (`BUILD SUCCESS`, all tests passing) before being added -
-  but that's not the same as a real GitHub Actions run. It also needs a
-  `PLATFORM_REPO_TOKEN` secret configured with read access to the
-  `iotmining` and `common` repos before it can run at all.
+- **CI** (`.github/workflows/ci.yml`) calls the shared iiotedge pipeline
+  (`iiotedge/platform-build/.github/workflows/maven-service.yml`). The
+  parent resolves from GitHub Packages with the repository's own
+  `GITHUB_TOKEN`, and `common/data`, `common/base` and `common/audit` are
+  built from source until they are published, so no secret is needed.
 
 ## Quality Gates & Production Readiness
 
@@ -184,7 +181,7 @@ Every `mvn verify` runs the full quality pipeline. A failure in any gate fails t
 |---|---|---|
 | Build environment | Maven Enforcer | Java ≥ 21, Maven ≥ 3.6.3, no duplicate dependencies |
 | Unit tests | JUnit 5 / Mockito / AssertJ | 185 tests, zero failures |
-| CI | GitHub Actions (`.github/workflows/ci.yml`) | Runs the same `mvn verify` on every PR/push to `main` - see Known limitations below on its current setup requirements |
+| CI | GitHub Actions (`.github/workflows/ci.yml`, shared pipeline) | `mvn verify` on every pull request; image build, Trivy scan and GHCR push on `main` and version tags |
 | Coverage | JaCoCo | ≥ 85% instructions, ≥ 65% branches (logic classes) |
 | Static & security analysis | SpotBugs + FindSecBugs | Zero unsuppressed findings (Medium+, effort Max) |
 

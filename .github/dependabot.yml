@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # Actions are pinned by commit SHA; Dependabot keeps them current. The
+  # shared pipeline (iiotedge/platform-build) is moved deliberately, together
+  # for all services, so it is excluded here.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: iiotedge/platform-build*
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # Most versions come from iiotedge-parent / iiotedge-bom (platform-build);
+  # this covers what the pom pins itself. Major upgrades are planned
+  # migrations and are not proposed here.
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      maven-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: '*'
+        update-types: [version-update:semver-major]
+    commit-message:
+      prefix: build

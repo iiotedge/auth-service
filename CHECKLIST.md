@@ -75,13 +75,11 @@ What's actually verified vs. still open, as of this hardening pass. See
 
 ## Deployment
 
-- [x] CI workflow exists (`.github/workflows/ci.yml`, `mvn verify` on every
-      PR/push to `main`) - **but needs a `PLATFORM_REPO_TOKEN` secret
-      configured and its first live run watched**; only verified via a
-      local simulation of the checkout layout, not a real runner
-- [ ] The multi-repo checkout `ci.yml` relies on is a stopgap - the real
-      fix is publishing the parent POM chain + `common` modules to GitHub
-      Packages (see `TODO.md`)
+- [x] CI workflow exists (`.github/workflows/ci.yml`, the shared iiotedge
+      pipeline): `mvn verify` on every pull request, image + Trivy + GHCR
+      push on `main` and version tags; no secret needed
+- [ ] Drop `common-modules` from `ci.yml` once `common` publishes its
+      modules to GitHub Packages (they are built from source until then)
 - [ ] OWASP dependency-check CVE scan automated (profile exists, not
       scheduled anywhere)
 - [ ] Verified running with more than one replica in a real environment

@@ -1,0 +1,35 @@
+name: CI
+
+# Pull requests: build and test. Pushes to main and version tags: also build,
+# scan and push the container image to ghcr.io/iiotedge/auth-service, and create a
+# GitHub Release for tags. Draft pull requests are skipped until they are
+# marked ready for review. The pipeline is shared by all iiotedge services:
+# iiotedge/platform-build/.github/workflows/maven-service.yml, pinned below by
+# commit (inputs are documented at the top of that file).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', '.gitignore', '.gitattributes']
+  push:
+    branches: [main]
+    tags: ['v*.*.*', '20*.*.*']
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', '.gitignore', '.gitattributes']
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    uses: iiotedge/platform-build/.github/workflows/maven-service.yml@8345e1c5c09831e6fce3441aaa5bc9a09b9c699f
+    permissions:
+      contents: write          # GitHub Release (version tags only)
+      packages: write          # GHCR push (main and version tags only)
+      security-events: write   # Trivy results to code scanning (main and version tags only)
+    with:
+      common-modules: data base audit           # built from iiotedge/common main until those modules are published
